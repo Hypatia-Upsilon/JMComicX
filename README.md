@@ -22,7 +22,7 @@ JMComicX 与 JMComic / 禁漫天堂及其关联方没有隶属、合作、授权
 | 语言      | Kotlin 2.4                    |
 | Android | minSdk 33 / targetSdk 37      |
 | UI      | Jetpack Compose、Compose Miuix |
-| 导航      | Navigation 3、MIUIX            |
+| 导航      | MIUIX Nav                     |
 | 网络      | OkHttp 5                      |
 | 图片      | Coil、Android Bitmap           |
 | 序列化     | Gson                          |
@@ -121,7 +121,7 @@ Chapter API
 - 搜索仅在提交后请求，支持简繁体匹配、标签、JM 车号和本地历史。
 - 首页、搜索结果与详情共享封面转场状态，返回时恢复来源页面。
 - 详情评论独立分页，不阻塞漫画主体和章节目录。
-- 主导航与二级页面使用 MIUIX Navigation 3 转场，系统返回统一回退到上一级。
+- 主导航与二级页面使用 MIUIX Nav 转场，系统返回统一回退到上一级。
 
 ## 功能范围
 

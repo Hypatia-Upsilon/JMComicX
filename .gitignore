@@ -8,6 +8,7 @@ local-credentials.properties
 docs/
 *.md
 !README.md
+!CHANGELOG.md
 app/signing/
 *.jks
 *.keystore
