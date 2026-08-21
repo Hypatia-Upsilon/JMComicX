@@ -2,29 +2,32 @@
 agp = "9.2.1"
 activity-compose = "1.13.0"
 core-splashscreen = "1.2.0"
-androidx-navigation3 = "1.1.4"
+androidx-navigationevent = "1.1.2"
 kotlin = "2.4.0"
 coroutines = "1.10.2"
-coil-compose = "2.7.0"
+coil = "3.5.0"
 okhttp = "5.3.2"
 gson = "2.13.2"
 junit = "4.13.2"
-miuix = "0.9.3"
+miuix = "0.9.4-rc01"
+miuix-nav = "0.9.4-rc01"
 opencc4j = "1.14.0"
 webp-imageio = "0.9.0"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "core-splashscreen" }
-androidx-navigation3-runtime = { group = "androidx.navigation3", name = "navigation3-runtime", version.ref = "androidx-navigation3" }
+androidx-navigationevent-compose = { group = "androidx.navigationevent", name = "navigationevent-compose-android", version.ref = "androidx-navigationevent" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
-coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil-compose" }
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+# Coil 3 不再内置网络加载器，取图必须显式装一个 fetcher；用 okhttp 版是为了与 core 复用同一套连接池与拦截器。
+coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 miuix-icons-android = { group = "top.yukonga.miuix.kmp", name = "miuix-icons-android", version.ref = "miuix" }
-miuix-navigation3-ui-android = { group = "top.yukonga.miuix.kmp", name = "miuix-navigation3-ui-android", version.ref = "miuix" }
+miuix-nav-android = { group = "top.yukonga.miuix.kmp", name = "miuix-nav-android", version.ref = "miuix-nav" }
 miuix-blur-android = { group = "top.yukonga.miuix.kmp", name = "miuix-blur-android", version.ref = "miuix" }
 miuix-ui-android = { group = "top.yukonga.miuix.kmp", name = "miuix-ui-android", version.ref = "miuix" }
 miuix-preference-android = { group = "top.yukonga.miuix.kmp", name = "miuix-preference-android", version.ref = "miuix" }
