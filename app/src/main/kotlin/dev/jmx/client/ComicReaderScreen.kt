@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,6 +61,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,34 +84,39 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.content.edit
 import androidx.core.graphics.createBitmap
-import coil.ImageLoader
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.imageLoader
-import coil.request.ImageRequest
-import coil.size.Size
-import coil.transform.Transformation
+import coil3.ImageLoader
+import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.SubcomposeAsyncImageContent
+import coil3.imageLoader
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
+import coil3.request.allowHardware
+import coil3.request.crossfade
+import coil3.request.transformations
+import coil3.size.Size
+import coil3.transform.Transformation
 import dev.jmx.client.core.api.AlbumChapter
 import dev.jmx.client.core.api.AlbumDetail
 import dev.jmx.client.core.chapter.ChapterTemplate
 import dev.jmx.client.core.download.ImageHttpHeaders
 import dev.jmx.client.core.image.ImagePipeline
 import dev.jmx.client.core.image.ImagePlan
-import dev.jmx.client.core.image.ImageUrl
 import dev.jmx.client.core.protocol.JmxProtocolConstants
 import dev.jmx.client.core.result.JmxResult
 import dev.jmx.client.core.runtime.JmxCore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
-import okhttp3.Headers
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Icon
@@ -149,7 +156,7 @@ internal data class ReaderPage(
     val index: Int,
     val url: String,
     val plan: ImagePlan,
-    val headers: Headers,
+    val headers: NetworkHeaders,
 )
 
 internal sealed interface ReaderChapterState {
@@ -248,7 +255,7 @@ private fun ComicReaderContent(
         if (loadedState is ReaderChapterState.Content) {
             val restoredPage = initialPageForChapter.coerceIn(loadedState.pages.indices)
             currentPageIndex = restoredPage
-            listState.scrollToItem(restoredPage)
+            listState.scrollToReaderPage(restoredPage)
             initialProgressConsumed = true
         }
     }
@@ -303,8 +310,16 @@ private fun ComicReaderContent(
 
     fun scrollToPage(index: Int) {
         if (pages.isEmpty()) return
+        val target = index.coerceIn(pages.indices)
+        // 先把页码推到目标值，再去滚动。
+        // scrollToItem 是挂起函数，而进度条显示的是 currentPageIndex——后者要等列表真正落位、
+        // snapshotFlow 再算一轮才会更新。若在这之前就交还控制权（松手时 sliderDraft 已被清空），
+        // 进度条会先读到旧页码，然后被 MIUIX Slider 的非拖拽动画（stiffness=322，约半秒）
+        // 慢慢地"退回"原处——表现就是"拖到 30 松手，进度条自己滑回 2"。
+        // 万一列表到不了目标（章节末尾余量不足），后续 snapshotFlow 会把它纠正回真实页。
+        currentPageIndex = target
         coroutineScope.launch {
-            listState.scrollToItem(index.coerceIn(pages.indices))
+            listState.scrollToReaderPage(target)
         }
     }
 
@@ -405,9 +420,10 @@ private fun ComicReaderContent(
                     sliderDraft = sliderDraft,
                     onSliderChange = { sliderDraft = it },
                     onSliderFinished = {
-                        val target = readerPageFromSlider(sliderDraft ?: currentPageIndex.toFloat(), pages.size)
+                        // 顺序要紧：scrollToPage 会同步把 currentPageIndex 推到目标页，
+                        // 之后清空草稿才不会让进度条露出一帧旧页码。
+                        scrollToPage(readerPageFromSlider(sliderDraft ?: currentPageIndex.toFloat(), pages.size))
                         sliderDraft = null
-                        scrollToPage(target)
                     },
                     canPreviousChapter = selectedChapterIndex > 0,
                     canNextChapter = selectedChapterIndex < chapters.lastIndex,
@@ -587,6 +603,24 @@ private fun ReaderPages(
     }
 }
 
+/**
+ * 一页漫画。
+ *
+ * 关键约束：**这个 item 从第一次测量起就必须有非零高度。**
+ *
+ * [SubcomposeAsyncImage] 在 Coil 的 `State.Empty`（请求还没发出的那一帧）既不会调 `loading`
+ * 槽也没有可用的固有尺寸，此时它量出来是 0 高。而 `LazyListState.scrollToItem` 会
+ * `forceRemeasure()`——恰好在目标页首次被组合的那一次测量里同步跑完。于是 LazyColumn 看到
+ * 目标页往后全是 0 高，就一路往后组合（整话的图片请求被一次性全部发出，这就是"跳转后
+ * 下面的漫画加载极慢"），仍填不满视口，最后按 LazyList 的既有行为**往回**补页，
+ * 直到撞上已经加载好、有真实高度的那几页为止——落点因此变成第 2 页、再试变成第 7 页，
+ * 每试一次前进一点；手动翻到第 27 页（沿途每页都量过真实高度）之后拖动就正常了。
+ * 落位成功的那次则是另一半症状：下方各页还是 0 高，列表以为已经到底，于是只能往上翻，
+ * 等图片陆续加载出高度才恢复。
+ *
+ * 因此在这一页量出真实高度之前，用 [READER_PAGE_PLACEHOLDER_HEIGHT] 兜住最小高度。
+ * 用 `heightIn(min=)` 而不是固定 `height()`：长图页比占位更高时不会被裁掉。
+ */
 @Composable
 private fun ReaderPageImage(
     page: ReaderPage,
@@ -598,6 +632,9 @@ private fun ReaderPageImage(
 ) {
     val context = LocalContext.current
     val request = remember(page, retryKey) { buildReaderImageRequest(context, page, retryKey) }
+    // 按 item 实例记，不能用外层按页码记的 loadedPages：那份记录在页面被回收后仍是 true，
+    // 回翻时新组合的 item 又会从 0 高开始。
+    var hasIntrinsicHeight by remember(page.plan.cacheKey, retryKey) { mutableStateOf(false) }
     if (knownError != null) {
         ReaderPageError(pageNumber = page.index + 1, message = knownError, onRetry = onRetry)
         return
@@ -605,7 +642,15 @@ private fun ReaderPageImage(
     SubcomposeAsyncImage(
         model = request,
         contentDescription = "第 ${page.index + 1} 页",
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (hasIntrinsicHeight) {
+                    Modifier
+                } else {
+                    Modifier.heightIn(min = READER_PAGE_PLACEHOLDER_HEIGHT)
+                },
+            ),
         contentScale = ContentScale.FillWidth,
         loading = { ReaderPageLoading(page.index + 1) },
         error = { state ->
@@ -619,7 +664,10 @@ private fun ReaderPageImage(
             )
         },
         success = {
-            LaunchedEffect(page.plan.cacheKey) { onLoaded() }
+            LaunchedEffect(page.plan.cacheKey) {
+                hasIntrinsicHeight = true
+                onLoaded()
+            }
             SubcomposeAsyncImageContent(modifier = Modifier.fillMaxWidth())
         },
     )
@@ -1051,15 +1099,22 @@ internal class ComicReaderRepository(
     private val imageLoader: ImageLoader = applicationContext.imageLoader
     private val imagePipeline = ImagePipeline()
 
+    /**
+     * 载入一话。
+     *
+     * 整段在 IO 线程上跑：除了出网与解密，[ImagePipeline.plan] 还要按页算一次 MD5，
+     * 一话上百页就是上百次——留在调用方（Compose 的 LaunchedEffect，主线程）上，
+     * 表现就是"进阅览页转圈快转完时卡一下"。
+     */
     suspend fun loadChapter(
         chapterId: String,
         imageHostHint: String?,
-    ): ReaderChapterState {
-        return try {
-            loadChapterFromApi(chapterId, imageHostHint)?.let { return it }
+    ): ReaderChapterState = withContext(Dispatchers.IO) {
+        try {
+            loadChapterFromApi(chapterId, imageHostHint)?.let { return@withContext it }
             val templateResult = withTimeoutOrNull(READER_TEMPLATE_TIMEOUT_MILLIS) {
                 core.chapterApi.template(chapterId, shunt = DEFAULT_IMAGE_SHUNT)
-            } ?: return ReaderChapterState.Error("章节准备超时，请检查网络后重试。")
+            } ?: return@withContext ReaderChapterState.Error("章节准备超时，请检查网络后重试。")
             when (val result = templateResult) {
                 is JmxResult.Success -> result.value.toReaderState()
                 is JmxResult.Failure -> ReaderChapterState.Error(result.error.toUiMessage())
@@ -1085,7 +1140,9 @@ internal class ComicReaderRepository(
         val numericId = photo.id.toIntOrNull() ?: chapterId.toIntOrNull() ?: return null
         val imageHost = photo.imageDomain
             ?: imageHostHint
-            ?: ImageUrl.pickDefaultImageHost()
+            // 兜底改为线路表当前最优的那台，而不是内置表的第一台：
+            // 后者是写死的顺序，被墙或过载时整章白屏且不会自愈。
+            ?: core.imageHostRegistry.current()
         val scrambleId = photo.scrambleId
             ?: core.chapterApi.cachedScrambleId(photo.id, photo.albumId)
             ?: JmxProtocolConstants.Scramble220980
@@ -1101,6 +1158,9 @@ internal class ComicReaderRepository(
     }
 
     private fun ChapterTemplate.toReaderState(): ReaderChapterState {
+        // /chapter 给的 data_original_domain 未必在内置线路表里，先并进去，
+        // 这一章的取图才会被选路拦截器接管（失败自动换机、成败计入健康度）。
+        core.imageHostRegistry.rememberHost(imageHost)
         val headers = ImageHttpHeaders.default(refererHost = imageHost).toCoilHeaders()
         val pages = imageUrls.mapIndexed { index, url ->
             ReaderPage(
@@ -1117,17 +1177,31 @@ internal class ComicReaderRepository(
         }
     }
 
+    /**
+     * 预取当前页之后的若干页。
+     *
+     * 原来只预取一页：连续翻页时用户几乎总是"翻到下一页 → 等它下载"，
+     * 预取的那一页刚好被立刻消费掉，等于没有缓冲。取 [PREFETCH_AHEAD_PAGES] 页是因为
+     * 单页解码后常驻内存不小（长图尤甚），再多就要和内存缓存里已看过的页互相挤。
+     * 顺序发起，让更近的那页先拿到带宽。
+     */
     suspend fun prefetchNext(pages: List<ReaderPage>, currentIndex: Int) {
-        val nextIndex = currentIndex + 1
-        if (nextIndex !in pages.indices) return
-        imageLoader.execute(buildReaderImageRequest(applicationContext, pages[nextIndex], retryKey = 0))
+        for (offset in 1..PREFETCH_AHEAD_PAGES) {
+            val nextIndex = currentIndex + offset
+            if (nextIndex !in pages.indices) return
+            imageLoader.execute(buildReaderImageRequest(applicationContext, pages[nextIndex], retryKey = 0))
+        }
+    }
+
+    private companion object {
+        const val PREFETCH_AHEAD_PAGES = 2
     }
 }
 
 internal fun buildReaderImageRequest(context: Context, page: ReaderPage, retryKey: Int): ImageRequest {
     val builder = ImageRequest.Builder(context)
         .data(page.url)
-        .headers(page.headers)
+        .httpHeaders(page.headers)
         .allowHardware(!page.plan.requiresRestore)
         .crossfade(false)
         .memoryCacheKey(
@@ -1145,7 +1219,7 @@ internal fun buildReaderImageRequest(context: Context, page: ReaderPage, retryKe
 private class JmxUnscrambleTransformation(
     private val plan: ImagePlan,
     private val pipeline: ImagePipeline = ImagePipeline(),
-) : Transformation {
+) : Transformation() {
     override val cacheKey: String = "$READER_RESTORE_VERSION:${plan.segmentCount}"
     private val restorePaint = Paint().apply {
         isAntiAlias = false
@@ -1200,6 +1274,26 @@ internal fun selectCurrentReaderPage(
 internal fun readerPageFromSlider(value: Float, totalPages: Int): Int {
     if (totalPages <= 1) return 0
     return value.roundToInt().coerceIn(0, totalPages - 1)
+}
+
+/**
+ * 落位到目标页，并在随后一两帧里确认落点。
+ *
+ * 目标页首次被组合的那一次测量（`scrollToItem` 内部的 `forceRemeasure()` 就发生在那里）
+ * 未必量得到真实高度，LazyColumn 会因为填不满视口而把落点往回拉，见 ReaderPageImage 的说明。
+ * [ReaderPageImage] 已经用占位高度堵住了这个洞，这里只作为兜底再确认一次。
+ *
+ * 次数刻意压得很小：真到了章节末尾余量不足时，落点本就该被夹住，不该无限纠正。
+ * 用户此时若已开始拖动列表，[LazyListState.scrollToItem] 会被优先级更高的手势抢掉滚动权
+ * 并抛出取消，这个循环随之安静结束。
+ */
+private suspend fun LazyListState.scrollToReaderPage(target: Int) {
+    scrollToItem(target)
+    repeat(READER_JUMP_SETTLE_ATTEMPTS) {
+        withFrameNanos { }
+        if (firstVisibleItemIndex == target) return
+        scrollToItem(target)
+    }
 }
 
 internal fun isReaderZoomed(scale: Float): Boolean =
@@ -1395,8 +1489,8 @@ internal tailrec fun Context.findActivity(): Activity? {
     }
 }
 
-private fun Map<String, String>.toCoilHeaders(): Headers {
-    return Headers.Builder().apply {
+private fun Map<String, String>.toCoilHeaders(): NetworkHeaders {
+    return NetworkHeaders.Builder().apply {
         forEach { (name, value) -> add(name, value) }
     }.build()
 }
@@ -1411,6 +1505,9 @@ private const val READER_VOLUME_KEYS = "volume_key_paging"
 private const val READER_BATTERY_TIME = "show_battery_time"
 private const val READER_PAGE_NUMBER = "show_page_number"
 private const val READER_PROGRESS_SAVE_DELAY_MILLIS = 350L
+
+/** 跳页后重新落位的确认次数，见 scrollToPage。 */
+private const val READER_JUMP_SETTLE_ATTEMPTS = 2
 private const val READER_MIN_ZOOM = 1f
 private const val READER_MAX_ZOOM = 4f
 private const val READER_DOUBLE_TAP_ZOOM = 2.5f

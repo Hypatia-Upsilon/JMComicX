@@ -2,9 +2,12 @@ package dev.jmx.client
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import dev.jmx.client.core.api.DailyCheckInfo
 import dev.jmx.client.core.api.DailyRecord
+import dev.jmx.client.core.result.JmxError
+import dev.jmx.client.core.result.JmxResult
 import java.util.Calendar
 
 class AccountLogicTest {
@@ -55,7 +58,11 @@ class AccountLogicTest {
         assertEquals("1 KB", formatByteCount(1_024))
         assertEquals("1.5 MB", formatByteCount(1_572_864))
         assertEquals("2 GB", formatByteCount(2_147_483_648))
-        assertEquals(96L * 1024L * 1024L, IMAGE_DISK_CACHE_MAX_BYTES)
+    }
+
+    @Test
+    fun imageDiskCacheBudgetStaysAtTwoHundredFiftySixMegabytes() {
+        assertEquals(256L * 1024L * 1024L, IMAGE_DISK_CACHE_MAX_BYTES)
     }
 
     @Test
@@ -104,5 +111,36 @@ class AccountLogicTest {
         assertEquals(7, dailyRewardCycleProgress(7))
         assertEquals(1, dailyRewardCycleProgress(8))
         assertEquals(7, dailyRewardCycleProgress(14))
+    }
+
+    @Test
+    fun emptyPayloadCheckInResolvesSuccessOnlyWhenTodayRecorded() {
+        val signedToday = DailyCheckInfo(
+            dailyId = 7,
+            eventName = null,
+            currentProgress = null,
+            records = listOf(DailyRecord(todayDate(), signed = true, bonus = false)),
+            raw = emptyMap(),
+        )
+        val notSignedToday = signedToday.copy(
+            records = listOf(DailyRecord(todayDate(), signed = false, bonus = false))
+        )
+
+        val resolved = resolveCheckInAfterEmptyPayload(JmxResult.Success(signedToday))
+        assertTrue(resolved is JmxResult.Success)
+        assertEquals("签到成功", (resolved as JmxResult.Success).value.message)
+
+        val notRecorded = resolveCheckInAfterEmptyPayload(JmxResult.Success(notSignedToday))
+        assertTrue(notRecorded is JmxResult.Failure)
+        assertTrue((notRecorded as JmxResult.Failure).error is JmxError.EmptyData)
+
+        val noEvent = resolveCheckInAfterEmptyPayload(JmxResult.Success(null))
+        assertTrue(noEvent is JmxResult.Failure)
+        assertTrue((noEvent as JmxResult.Failure).error is JmxError.EmptyData)
+
+        val failure: JmxResult<DailyCheckInfo?> = JmxResult.Failure(JmxError.Network("offline"))
+        val passed = resolveCheckInAfterEmptyPayload(failure)
+        assertTrue(passed is JmxResult.Failure)
+        assertTrue((passed as JmxResult.Failure).error is JmxError.Network)
     }
 }

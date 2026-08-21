@@ -31,8 +31,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
+import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.SubcomposeAsyncImageContent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -43,6 +43,8 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Contacts
 import top.yukonga.miuix.kmp.icon.extended.Favorites
@@ -63,6 +65,7 @@ internal data class LoginUiFailure(
 @Composable
 internal fun AccountScreen(
     innerPadding: PaddingValues,
+    backdrop: LayerBackdrop? = null,
     profile: AccountProfile?,
     imageHost: String,
     onLoginRequested: () -> Unit,
@@ -81,6 +84,7 @@ internal fun AccountScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
             .background(MiuixTheme.colorScheme.surface),
         contentPadding = PaddingValues(
             start = 12.dp,
