@@ -36,7 +36,12 @@ class ApiEndpointProber(
     private val tokenProvider: ApiTokenProvider = ApiTokenProvider(),
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
     private val responseDecoder: ApiResponseDecoder = ApiResponseDecoder(),
-    private val bodySampler: BodySampler = BodySampler()
+    private val bodySampler: BodySampler = BodySampler(),
+    /**
+     * 内容语言，需与 [JmxHttpClient] 用的是同一个来源。探测请求要和真实请求同构，
+     * 否则探测出来的"这台机器可用"说的是另一条 URL 的事。
+     */
+    private val queryLanguageProvider: () -> String? = { null }
 ) {
     suspend fun probeAll(route: ApiRoute = ApiRoute.Setting): List<ApiEndpointProbeResult> {
         val endpoints = endpointManager.all().map { it.url }
@@ -49,7 +54,12 @@ class ApiEndpointProber(
         withContext(Dispatchers.IO) {
             val startedAt = System.nanoTime()
             val token = tokenProvider.create(route)
-            val requestUrl = url.newBuilder().encodedPath(route.path).build()
+            val requestUrl = buildApiUrl(
+                baseUrl = url,
+                apiRequest = apiRequest(route),
+                timestampSeconds = token.timestampSeconds,
+                queryLanguage = queryLanguageProvider()
+            )
             val request = buildRequest(requestUrl, route, token.token, token.tokenParam)
             runCatching {
                 okHttpClient.newCall(request).execute().use { response ->

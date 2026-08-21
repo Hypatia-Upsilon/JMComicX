@@ -15,6 +15,16 @@ class BookshelfRepositoryTest {
     )
     private val secondAlbum = firstAlbum.copy(id = "2", name = "第二本")
 
+    /** 分组的匹配规则与导入导出无关，测试里只关心 id 与名称。 */
+    private fun group(id: String, name: String, createdAt: Long) = BookshelfGroup(
+        id = id,
+        name = name,
+        matchFavoritesByTags = false,
+        tagRules = emptyList(),
+        createdAt = createdAt,
+        updatedAt = createdAt,
+    )
+
     @Test
     fun addingSameAlbumKeepsProgressAndDoesNotDuplicate() {
         val (initial, added) = addToBookshelf(emptyList(), firstAlbum, addedAt = 10L)
@@ -116,6 +126,16 @@ class BookshelfRepositoryTest {
     }
 
     @Test
+    fun authorRulesRequireEveryAuthorAndNormalizeTraditionalChinese() {
+        val rules = parseBookshelfAuthorRules("作者甲，作者乙")
+
+        assertEquals(listOf("作者甲", "作者乙"), rules)
+        assertTrue(matchesBookshelfAuthorRules("作者甲 / 作者乙", rules))
+        assertTrue(matchesBookshelfAuthorRules("測試作者 甲作家", listOf("测试作者", "甲作家")))
+        assertFalse(matchesBookshelfAuthorRules("作者甲", rules))
+    }
+
+    @Test
     fun assigningEntriesToGroupsOnlyChangesSelectedAlbums() {
         val entries = listOf(
             BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a")),
@@ -151,5 +171,138 @@ class BookshelfRepositoryTest {
         assertTrue(album.matchesBookshelfPickerQuery("测试作者"))
         assertTrue(album.matchesBookshelfPickerQuery("JM438516"))
         assertFalse(album.matchesBookshelfPickerQuery("韩漫"))
+    }
+
+    @Test
+    fun exportingOneGroupKeepsOnlyThatGroupAndDropsDanglingMemberships() {
+        val groups = listOf(
+            group("group-a", "甲组", createdAt = 1L),
+            group("group-b", "乙组", createdAt = 2L),
+        )
+        val entries = listOf(
+            BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a", "group-b")),
+            BookshelfEntry("2", "第二本", "", "", "", 20L, groupIds = setOf("group-b")),
+            BookshelfEntry("3", "第三本", "", "", "", 30L),
+        )
+
+        val snapshot = bookshelfSnapshotOf(entries, groups, setOf("group-a"), includeGroups = true)
+
+        assertEquals(listOf("group-a"), snapshot.groups.map { it.id })
+        assertEquals(listOf("1"), snapshot.entries.map { it.albumId })
+        assertEquals(setOf("group-a"), snapshot.entries.single().groupIds)
+    }
+
+    @Test
+    fun exportingEverythingWithoutGroupsKeepsAllComicsButNoMemberships() {
+        val groups = listOf(group("group-a", "甲组", createdAt = 1L))
+        val entries = listOf(
+            BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a")),
+            BookshelfEntry("2", "第二本", "", "", "", 20L),
+        )
+
+        val snapshot = bookshelfSnapshotOf(entries, groups, groupIds = null, includeGroups = false)
+
+        assertTrue(snapshot.groups.isEmpty())
+        assertEquals(listOf("1", "2"), snapshot.entries.map { it.albumId })
+        assertTrue(snapshot.entries.all { it.groupIds.isEmpty() })
+    }
+
+    @Test
+    fun replacingDropsLocalContentAndCutsMembershipsToImportedGroups() {
+        val local = BookshelfSnapshot(
+            entries = listOf(BookshelfEntry("9", "本地", "", "", "", 5L)),
+            groups = listOf(group("group-local", "本地组", createdAt = 1L)),
+        )
+        val incoming = BookshelfSnapshot(
+            entries = listOf(
+                BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a", "group-missing")),
+            ),
+            groups = listOf(group("group-a", "甲组", createdAt = 2L)),
+        )
+
+        val (next, outcome) = replaceBookshelfWith(incoming)
+
+        assertEquals(listOf("1"), next.entries.map { it.albumId })
+        assertEquals(setOf("group-a"), next.entries.single().groupIds)
+        assertEquals(listOf("group-a"), next.groups.map { it.id })
+        assertEquals(1, outcome.addedEntries)
+        assertEquals(0, outcome.droppedEntries)
+        assertFalse(next.entries.map { it.albumId }.containsAll(local.entries.map { it.albumId }))
+    }
+
+    @Test
+    fun mergingReusesGroupsByNameAndNeverOverwritesLocalProgress() {
+        val localGroups = listOf(group("group-mine", "甲组", createdAt = 1L))
+        val localEntries = listOf(
+            BookshelfEntry("1", "第一本", "", "", "", 10L, lastChapterId = "11", lastPageIndex = 8),
+        )
+        val incoming = BookshelfSnapshot(
+            entries = listOf(
+                BookshelfEntry("1", "别人的标题", "", "", "", 99L, groupIds = setOf("group-theirs"), lastPageIndex = 3),
+                BookshelfEntry("2", "第二本", "", "", "", 98L, groupIds = setOf("group-new")),
+            ),
+            groups = listOf(
+                group("group-theirs", "甲组", createdAt = 2L),
+                group("group-new", "乙组", createdAt = 3L),
+            ),
+        )
+
+        val (next, outcome) = mergeBookshelfWith(localEntries, localGroups, incoming, mergedAt = 500L)
+
+        assertEquals(listOf("group-mine", "group-new"), next.groups.map { it.id })
+        assertEquals(1, outcome.reusedGroups)
+        assertEquals(1, outcome.addedGroups)
+        assertEquals(1, outcome.addedEntries)
+        assertEquals(1, outcome.mergedEntries)
+
+        val kept = next.entries.first { it.albumId == "1" }
+        assertEquals("第一本", kept.name)
+        assertEquals("11", kept.lastChapterId)
+        assertEquals(8, kept.lastPageIndex)
+        assertEquals(setOf("group-mine"), kept.groupIds)
+        assertEquals(500L, kept.updatedAt)
+        assertEquals(setOf("group-new"), next.entries.first { it.albumId == "2" }.groupIds)
+    }
+
+    @Test
+    fun mergingOwnExportBackRemapsCollidingGroupIdsInsteadOfDuplicatingNames() {
+        val localGroups = listOf(group("group-a", "甲组", createdAt = 1L))
+        val localEntries = listOf(BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a")))
+        val renamed = BookshelfSnapshot(
+            entries = listOf(BookshelfEntry("2", "第二本", "", "", "", 20L, groupIds = setOf("group-a"))),
+            groups = listOf(group("group-a", "乙组", createdAt = 2L)),
+        )
+
+        val (next, outcome) = mergeBookshelfWith(
+            entries = localEntries,
+            groups = localGroups,
+            snapshot = renamed,
+            mergedAt = 500L,
+            freshGroupId = { "group-fresh" },
+        )
+
+        assertEquals(listOf("甲组", "乙组"), next.groups.map { it.name })
+        assertEquals(listOf("group-a", "group-fresh"), next.groups.map { it.id })
+        assertEquals(setOf("group-fresh"), next.entries.first { it.albumId == "2" }.groupIds)
+        assertEquals(setOf("group-a"), next.entries.first { it.albumId == "1" }.groupIds)
+        assertEquals(0, outcome.reusedGroups)
+    }
+
+    @Test
+    fun mergingIdenticalFileTwiceChangesNothingTheSecondTime() {
+        val groups = listOf(group("group-a", "甲组", createdAt = 1L))
+        val incoming = BookshelfSnapshot(
+            entries = listOf(BookshelfEntry("1", "第一本", "", "", "", 10L, groupIds = setOf("group-a"))),
+            groups = groups,
+        )
+
+        val (once, _) = mergeBookshelfWith(emptyList(), emptyList(), incoming, mergedAt = 500L)
+        val (twice, outcome) = mergeBookshelfWith(once.entries, once.groups, incoming, mergedAt = 600L)
+
+        assertEquals(once, twice)
+        assertEquals(0, outcome.addedEntries)
+        assertEquals(0, outcome.mergedEntries)
+        assertEquals(0, outcome.addedGroups)
+        assertEquals(1, outcome.reusedGroups)
     }
 }

@@ -1,7 +1,5 @@
 package dev.jmx.client.core.image
 
-import dev.jmx.client.core.protocol.JmxProtocolConstants
-
 object ImageUrl {
     fun of(
         imageHost: String,
@@ -67,12 +65,6 @@ object ImageUrl {
             raw.contains("/") -> "$host/${raw.trimStart('/')}"
             else -> "$host/media/albums/${raw.toAlbumCoverFileName()}"
         }
-    }
-
-    fun pickDefaultImageHost(index: Int = 0): String {
-        val hosts = JmxProtocolConstants.DefaultImageHosts
-        if (hosts.isEmpty()) return "https://cdn-msp.jmapiproxy1.cc"
-        return hosts[index.mod(hosts.size)]
     }
 
     private fun normalizeHost(imageHost: String): String {

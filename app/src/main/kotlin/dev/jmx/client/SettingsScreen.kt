@@ -1,5 +1,6 @@
 package dev.jmx.client
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.jmx.client.effect.FloatingNavBarStyle
+import dev.jmx.client.effect.TopBarBlurStyle
 import dev.jmx.client.core.result.JmxResult
 import java.util.Locale
 import kotlinx.coroutines.launch
@@ -46,6 +49,8 @@ import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.window.WindowDialog
 
@@ -63,6 +68,11 @@ internal fun SettingsScreen(
     onAutoCheckUpdatesChanged: (Boolean) -> Unit,
     onCheckForUpdates: () -> Unit,
     onImageHostChanged: () -> Unit,
+    onContentLanguageChanged: () -> Unit,
+    onTopBarBlurStyleChanged: (TopBarBlurStyle) -> Unit,
+    onLiquidGlassNavBarChanged: (Boolean) -> Unit,
+    onFloatingNavBarStyleChanged: (FloatingNavBarStyle) -> Unit,
+    backdrop: LayerBackdrop? = null,
 ) {
     var showClearConfirmation by remember { mutableStateOf(false) }
     var clearing by remember { mutableStateOf(false) }
@@ -70,6 +80,10 @@ internal fun SettingsScreen(
     var showEndpoints by remember { mutableStateOf(false) }
     var cacheSize by remember { mutableStateOf<Long?>(null) }
     var cacheRefreshKey by remember { mutableIntStateOf(0) }
+    var contentLanguage by remember(repository) { mutableStateOf(repository.contentLanguage()) }
+    var topBarBlurStyle by remember(repository) { mutableStateOf(repository.topBarBlurStyle()) }
+    var liquidGlassNavBar by remember(repository) { mutableStateOf(repository.liquidGlassNavBarEnabled()) }
+    var floatingNavBarStyle by remember(repository) { mutableStateOf(repository.floatingNavBarStyle()) }
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(repository, cacheRefreshKey) {
@@ -79,6 +93,7 @@ internal fun SettingsScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
             .background(MiuixTheme.colorScheme.surface),
         contentPadding = PaddingValues(
             top = innerPadding.calculateTopPadding() + 8.dp,
@@ -99,6 +114,64 @@ internal fun SettingsScreen(
                             AppThemeMode.entries.getOrNull(index)?.let(onThemeModeChanged)
                         },
                     )
+                    WindowDropdownPreference(
+                        title = "内容语言",
+                        summary = if (contentLanguage == CONTENT_LANGUAGE_TRADITIONAL) {
+                            "繁體中文 · 标题、简介与标签显示为繁体"
+                        } else {
+                            "简体中文 · 标题、简介与标签显示为简体"
+                        },
+                        items = listOf("简体中文", "繁體中文"),
+                        selectedIndex = if (contentLanguage == CONTENT_LANGUAGE_TRADITIONAL) 1 else 0,
+                        onSelectedIndexChange = { index ->
+                            val language = if (index == 1) CONTENT_LANGUAGE_TRADITIONAL else CONTENT_LANGUAGE_SIMPLIFIED
+                            if (language != contentLanguage) {
+                                repository.setContentLanguage(language)
+                                contentLanguage = language
+                                // 语言只影响服务端返回的文案，已加载的内容不会自行变化，
+                                // 必须像切换图源那样主动丢弃并重新请求。
+                                onContentLanguageChanged()
+                            }
+                        },
+                    )
+                    WindowDropdownPreference(
+                        title = "顶栏模糊样式",
+                        summary = "滚动内容在顶栏后的显示效果：${topBarBlurStyle.label()}",
+                        items = TopBarBlurStyle.entries.map(TopBarBlurStyle::label),
+                        selectedIndex = TopBarBlurStyle.entries.indexOf(topBarBlurStyle),
+                        onSelectedIndexChange = { index ->
+                            TopBarBlurStyle.entries.getOrNull(index)?.let { style ->
+                                repository.setTopBarBlurStyle(style)
+                                topBarBlurStyle = style
+                                onTopBarBlurStyleChanged(style)
+                            }
+                        },
+                    )
+                    SwitchPreference(
+                        title = "悬浮底栏",
+                        summary = "底部导航切换为悬浮样式，可选择默认磨砂或 iOS 液态玻璃，需要设备支持",
+                        checked = liquidGlassNavBar,
+                        onCheckedChange = { enabled ->
+                            repository.setLiquidGlassNavBarEnabled(enabled)
+                            liquidGlassNavBar = enabled
+                            onLiquidGlassNavBarChanged(enabled)
+                        },
+                    )
+                    AnimatedVisibility(visible = liquidGlassNavBar) {
+                        WindowDropdownPreference(
+                            title = "悬浮底栏样式",
+                            summary = "当前：${floatingNavBarStyle.label()}",
+                            items = FloatingNavBarStyle.entries.map(FloatingNavBarStyle::label),
+                            selectedIndex = FloatingNavBarStyle.entries.indexOf(floatingNavBarStyle),
+                            onSelectedIndexChange = { index ->
+                                FloatingNavBarStyle.entries.getOrNull(index)?.let { style ->
+                                    repository.setFloatingNavBarStyle(style)
+                                    floatingNavBarStyle = style
+                                    onFloatingNavBarStyleChanged(style)
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -326,7 +399,7 @@ private fun EndpointSelectionDialog(
 }
 
 @Composable
-private fun EndpointOptions(
+internal fun EndpointOptions(
     state: EndpointDialogState,
     repository: AppSettingsRepository,
     onRefresh: () -> Unit,
@@ -334,10 +407,11 @@ private fun EndpointOptions(
     onImageHostChanged: () -> Unit,
     onProbeApi: (String) -> Unit,
     onProbeImage: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val endpoints = state.endpoints
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
     ) {
@@ -507,7 +581,7 @@ private fun EndpointProbeUi.signalColor(): Color = when {
     else -> SlowSignalColor
 }
 
-private fun String.endpointDisplayName(): String = removePrefix("https://")
+internal fun String.endpointDisplayName(): String = removePrefix("https://")
     .removePrefix("http://")
     .trimEnd('/')
 
@@ -527,7 +601,7 @@ internal fun formatByteCount(bytes: Long): String {
     }
 }
 
-private data class EndpointDialogState(
+internal data class EndpointDialogState(
     val endpoints: EndpointSettingsState,
 )
 

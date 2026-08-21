@@ -20,6 +20,7 @@ fun JmxError.diagnosticSeverity(): JmxDiagnosticSeverity {
         is JmxError.Schema,
         is JmxError.Decode,
         is JmxError.Api -> JmxDiagnosticSeverity.Error
+        is JmxError.EmptyData -> JmxDiagnosticSeverity.Warning
         is JmxError.Http -> if (retryable) JmxDiagnosticSeverity.Warning else JmxDiagnosticSeverity.Error
         is JmxError.Network,
         is JmxError.Domain -> JmxDiagnosticSeverity.Warning

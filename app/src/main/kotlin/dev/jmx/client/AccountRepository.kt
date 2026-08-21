@@ -42,10 +42,31 @@ internal class AccountRepository(
     @Volatile
     private var authenticationGeneration = 0L
 
+    /**
+     * 已经因"空载荷"重登过一次、且重登后依然是空载荷的登录态编号。
+     * 见 [withSessionRecovery] 的 treatEmptyDataAsSessionLoss。
+     */
+    @Volatile
+    private var emptyDataVerifiedAtGeneration = -1L
+
+    /**
+     * 冷启动时立即可用的登录态。
+     *
+     * 判据从"有 AVS Cookie"放宽为"有 AVS Cookie **或**本地留有凭据"。
+     * AVS 只是传输层的会话票据：服务端过期、域名表换代、某个响应带来一条删除指令，
+     * 都会让它消失，而这些都不代表用户退出了登录。原来只要 AVS 不在冷启动就当未登录，
+     * 于是"划掉后台再进来点收藏"必然弹登录框——即使凭据还在本地，
+     * [withSessionRecovery] 本来完全有能力在后台悄悄换回一个新会话。
+     * 现在把凭据当作持久身份、AVS 当作可再生的票据：先按已登录渲染，
+     * 真发请求时若确实失效，恢复逻辑会重登一次，用户看不到中断。
+     */
     fun restore(): AccountProfile? {
-        if (!core.sessionManager.hasAvs()) return null
+        if (!core.sessionManager.hasAvs() && !credentialStore.hasCredentials()) return null
         return cachedProfile()
     }
+
+    /** 本地是否留有可静默重登的凭据。界面用它判断"会话还在恢复中"值不值得等，而不是直接弹登录框。 */
+    fun hasStoredCredentials(): Boolean = credentialStore.hasCredentials()
 
     private fun cachedProfile(): AccountProfile? {
         val encoded = preferences.getString(ACCOUNT_PROFILE_KEY, null) ?: return null
@@ -65,18 +86,43 @@ internal class AccountRepository(
             loginLocked(AccountCredentials(username.trim(), password), persistCredentials = true)
         }
 
+    /**
+     * 拉起一个真正可用的会话，并返回登录态资料。
+     *
+     * 与 [restore] 的分工：[restore] 只回答"界面该不该按已登录渲染"（同步、不联网），
+     * 这里还要保证 AVS 真的在——冷启动时它可能已经没了，若等到用户点进收藏再靠 401 补登录，
+     * 那一次点击就要多背一个登录往返。有 AVS 时不做任何网络动作，热启动路径不受影响。
+     */
     suspend fun restoreSession(): AccountProfile? = withContext(Dispatchers.IO) {
-        restore()?.let { return@withContext it }
-        val credentials = credentialStore.load() ?: return@withContext null
+        val cached = restore()
+        if (core.sessionManager.hasAvs()) return@withContext cached
+        val credentials = credentialStore.load() ?: return@withContext cached
         authenticationMutex.withLock {
-            restore() ?: (loginLocked(credentials, persistCredentials = true) as? JmxResult.Success)?.value
+            if (core.sessionManager.hasAvs()) return@withLock restore()
+            (loginLocked(credentials, persistCredentials = true) as? JmxResult.Success)?.value ?: cached
         }
     }
 
-    suspend fun <T> withSessionRecovery(block: suspend () -> JmxResult<T>): JmxResult<T> {
+    /**
+     * 执行 [block]，若失败原因是会话失效则重新登录并重试一次。
+     *
+     * @param treatEmptyDataAsSessionLoss 是否把 [JmxError.EmptyData] 也当作会话失效的信号。
+     *   签到接口（/daily）在会话过期时并不回 401，而是回 `code=200` + 空 data，
+     *   与"当期确实没有活动"长得一模一样，因此默认不认它——收藏夹为空之类的正常空结果
+     *   不该触发重登。只有本来就必须带登录态、且空载荷几乎只可能是掉登录的调用才打开。
+     *   打开后同一个登录态最多因此重登一次：重登后仍是空载荷就认定"服务端真的没内容"，
+     *   否则每次打开签到页都会白重登一次。
+     */
+    suspend fun <T> withSessionRecovery(
+        treatEmptyDataAsSessionLoss: Boolean = false,
+        block: suspend () -> JmxResult<T>,
+    ): JmxResult<T> {
         val generation = authenticationGeneration
         val first = block()
-        if (first !is JmxResult.Failure || !first.error.requiresSessionRecovery()) return first
+        if (first !is JmxResult.Failure) return first
+        val emptyDataSuspected = treatEmptyDataAsSessionLoss && first.error is JmxError.EmptyData
+        if (!first.error.requiresSessionRecovery() && !emptyDataSuspected) return first
+        if (emptyDataSuspected && emptyDataVerifiedAtGeneration == generation) return first
         val credentials = credentialStore.load() ?: return first
 
         return authenticationMutex.withLock {
@@ -86,7 +132,14 @@ internal class AccountRepository(
                     is JmxResult.Failure -> return@withLock login
                 }
             }
-            block()
+            block().also { retried ->
+                if (emptyDataSuspected &&
+                    retried is JmxResult.Failure &&
+                    retried.error is JmxError.EmptyData
+                ) {
+                    emptyDataVerifiedAtGeneration = authenticationGeneration
+                }
+            }
         }
     }
 

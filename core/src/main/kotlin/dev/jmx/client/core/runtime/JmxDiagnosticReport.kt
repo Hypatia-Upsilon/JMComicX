@@ -54,6 +54,7 @@ class JmxDiagnosticMarkdownRenderer {
             appendLine("- API version: `${sanitizeDiagnosticText(report.health.apiVersion)}`")
             appendLine("- Endpoint mode: `${sanitizeDiagnosticText(report.health.endpointSelection.mode)}`")
             appendLine("- Manual endpoint: `${sanitizeNullable(report.health.endpointSelection.manualUrl)}`")
+            appendLine("- Session endpoint: `${sanitizeNullable(report.health.endpointSelection.sessionUrl)}`")
             appendLine("- Cookie count: `${report.health.cookieCount}`")
             appendLine("- Download concurrency: `${report.health.downloadConcurrency}`")
             appendLine("- Has warnings: `${report.hasWarnings}`")

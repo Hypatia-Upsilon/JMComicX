@@ -101,7 +101,7 @@ class ApiResponseDecoder(
         body: String
     ): JmxResult<JsonElement> {
         if (dataElement.isJsonNull) {
-            return JmxResult.Failure(JmxError.Schema("API 响应 data 为 null：${bodySampler.sample(body)}", field = "data"))
+            return JmxResult.Failure(JmxError.EmptyData("API 响应 data 为 null：${bodySampler.sample(body)}"))
         }
         if (dataElement.isJsonObject || dataElement.isJsonArray) {
             return JmxResult.Success(dataElement)

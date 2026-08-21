@@ -11,7 +11,9 @@ data class JmxCoreHealth(
 
 data class EndpointSelectionHealth(
     val mode: String,
-    val manualUrl: String?
+    val manualUrl: String?,
+    /** 登录态绑定的域名（见 ApiEndpointManager.useSessionEndpoint）；未登录为 null。 */
+    val sessionUrl: String? = null
 )
 
 data class EndpointHealth(

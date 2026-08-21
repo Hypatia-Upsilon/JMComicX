@@ -107,7 +107,8 @@ class ApiResponseDecoderTest {
 
         assertTrue(nullResult is JmxResult.Failure)
         assertTrue(blankResult is JmxResult.Failure)
-        assertEquals("data", ((nullResult as JmxResult.Failure).error as JmxError.Schema).field)
+        assertTrue((nullResult as JmxResult.Failure).error is JmxError.EmptyData)
+        assertTrue((blankResult as JmxResult.Failure).error is JmxError.Schema)
         assertTrue((blankResult as JmxResult.Failure).error.message.contains("加密 data 为空"))
     }
 

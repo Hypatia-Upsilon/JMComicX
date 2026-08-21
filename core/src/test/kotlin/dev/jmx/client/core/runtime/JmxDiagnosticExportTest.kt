@@ -4,7 +4,6 @@ import dev.jmx.client.core.cache.InMemoryKeyValueStore
 import dev.jmx.client.core.network.DefaultRetryPolicy
 import dev.jmx.client.core.result.JmxError
 import dev.jmx.client.core.result.JmxResult
-import dev.jmx.client.core.session.SessionManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

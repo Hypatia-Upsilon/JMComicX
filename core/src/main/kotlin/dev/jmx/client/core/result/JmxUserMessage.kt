@@ -55,6 +55,13 @@ fun JmxError.toUserMessage(): JmxUserMessage {
             actions = descriptor.actions,
             kind = JmxErrorKind.Schema
         )
+        is JmxError.EmptyData -> JmxUserMessage(
+            title = "暂无数据",
+            userMessage = "服务端暂时没有返回数据，请稍后重试。",
+            retryable = retryable,
+            actions = descriptor.actions,
+            kind = descriptor.kind
+        )
         is JmxError.Domain -> JmxUserMessage(
             title = "线路不可用",
             userMessage = "当前线路不可用，正在尝试其他线路，或请手动切换/刷新线路。",

@@ -232,4 +232,117 @@ class ApiEndpointManagerTest {
         assertEquals("manual failed", endpoint.lastFailureMessage)
         assertEquals(listOf("https://auto.test"), stateStore.apiHosts())
     }
+
+    /**
+     * 会话亲和的核心诉求：冷启动要回到签发登录态的那台机器上。
+     *
+     * 服务端把 AVS 绑在签发它的域名上，换机就是 401「請先登入會員」——
+     * 这正是"点收藏要求重新登录、登录后正常、再冷启动又要求登录"的成因。
+     */
+    @Test
+    fun sessionEndpointOutranksHealthAndSurvivesColdStart() {
+        val stateStore = ProtocolStateStore(InMemoryKeyValueStore())
+        stateStore.updateApiHosts(listOf("https://first.test", "https://second.test"))
+        val manager = ApiEndpointManager(
+            initialHosts = listOf("https://first.test", "https://second.test"),
+            protocolStateStore = stateStore
+        )
+        // 让 first 明显更健康，确认亲和确实压过了健康度而不是碰巧同序。
+        manager.markSuccess("https://first.test".normalizedBaseUrlOrNull()!!, latencyMillis = 10)
+
+        val selected = manager.useSessionEndpoint("second.test")
+
+        assertTrue(selected is JmxResult.Success)
+        assertEquals("https://second.test/", (manager.current() as JmxResult.Success).value.toString())
+        // 亲和不是用户的选择：不该冒充"手动线路"，也不该关掉自动选路。
+        assertTrue(manager.selection() is ApiEndpointSelection.Auto)
+        assertEquals(null, stateStore.manualApiHost())
+        assertEquals("https://second.test/", stateStore.sessionApiHost())
+
+        val restarted = ApiEndpointManager(protocolStateStore = stateStore)
+        assertEquals("https://second.test/", (restarted.current() as JmxResult.Success).value.toString())
+        assertEquals("https://second.test/", restarted.sessionEndpoint()?.toString())
+    }
+
+    /** 那台真的连不上时还是要换机：换机后的 401 会触发静默重登，重登又会把亲和挪过来。 */
+    @Test
+    fun sessionEndpointYieldsWhileDemoted() {
+        var now = 1_000L
+        val manager = ApiEndpointManager(
+            initialHosts = listOf("https://first.test", "https://second.test"),
+            maxFailuresBeforeDemote = 1,
+            nowMillis = { now }
+        )
+        val session = (manager.useSessionEndpoint("second.test") as JmxResult.Success).value
+
+        manager.markFailure(session, "timeout")
+
+        assertEquals("https://first.test/", (manager.current() as JmxResult.Success).value.toString())
+        // 换机重试时把它排除掉，同样不能被亲和拉回来。
+        assertEquals(
+            "https://first.test/",
+            (manager.current(excludedUrl = session) as JmxResult.Success).value.toString()
+        )
+
+        now = 10_000L
+        assertEquals("https://second.test/", (manager.current() as JmxResult.Success).value.toString())
+    }
+
+    /** 用户显式钉的线路仍然最高优先：亲和只排在自动选路前面。 */
+    @Test
+    fun manualEndpointStillOutranksSessionEndpoint() {
+        val manager = ApiEndpointManager(listOf("https://first.test"))
+        manager.useSessionEndpoint("session.test")
+
+        manager.useManualEndpoint("manual.test")
+
+        assertEquals("https://manual.test/", (manager.current() as JmxResult.Success).value.toString())
+        assertEquals("https://session.test/", manager.sessionEndpoint()?.toString())
+    }
+
+    /** 远程域名表刷新不能把会话绑定的那台踢出去——踢掉就等于让用户掉登录。 */
+    @Test
+    fun remoteRefreshKeepsSessionEndpoint() {
+        val stateStore = ProtocolStateStore(InMemoryKeyValueStore())
+        val manager = ApiEndpointManager(
+            initialHosts = listOf("https://first.test"),
+            protocolStateStore = stateStore
+        )
+        manager.useSessionEndpoint("session.test")
+
+        manager.replaceAll(listOf("https://fresh.test"))
+
+        assertEquals(listOf("https://fresh.test/"), stateStore.apiHosts())
+        assertEquals("https://session.test/", (manager.current() as JmxResult.Success).value.toString())
+        assertEquals(
+            listOf("https://fresh.test/", "https://session.test/"),
+            manager.all().map { it.url.toString() }
+        )
+    }
+
+    @Test
+    fun clearingSessionEndpointReturnsToHealthSelection() {
+        val stateStore = ProtocolStateStore(InMemoryKeyValueStore())
+        stateStore.updateApiHosts(listOf("https://first.test"))
+        val manager = ApiEndpointManager(
+            initialHosts = listOf("https://first.test"),
+            protocolStateStore = stateStore
+        )
+        manager.useSessionEndpoint("session.test")
+
+        manager.clearSessionEndpoint()
+
+        assertEquals(null, manager.sessionEndpoint())
+        assertEquals(null, stateStore.sessionApiHost())
+        assertEquals("https://first.test/", (manager.current() as JmxResult.Success).value.toString())
+        assertEquals(listOf("https://first.test/"), manager.all().map { it.url.toString() })
+    }
+
+    @Test
+    fun rejectsInvalidSessionHost() {
+        val manager = ApiEndpointManager(listOf("https://first.test"))
+
+        assertTrue(manager.useSessionEndpoint("bad host") is JmxResult.Failure)
+        assertEquals(null, manager.sessionEndpoint())
+    }
 }

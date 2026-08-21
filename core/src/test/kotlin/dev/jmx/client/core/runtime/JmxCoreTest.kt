@@ -29,6 +29,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+private const val TEST_HOSTS_GENERATION = "2026-08"
+
 class JmxCoreTest {
     private lateinit var server: MockWebServer
     private lateinit var domainServer: MockWebServer
@@ -53,7 +55,8 @@ class JmxCoreTest {
         val keyValueStore = InMemoryKeyValueStore(
             mapOf(
                 "protocol.api.version" to "1.0.0",
-                "protocol.api.hosts" to server.url("/").toString()
+                "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
             )
         )
         val core = JmxCore.create(
@@ -71,8 +74,9 @@ class JmxCoreTest {
         assertEquals("2.1.0", core.apiVersionProvider.current())
         assertEquals("2.1.0", core.protocolStateStore.apiVersion())
         val recorded = server.takeRequest()
-        assertEquals("/setting", recorded.path)
-        assertEquals("1700566805,1.0.0", recorded.headers["tokenparam"])
+        // 比对不含查询串的路径：setting 会被追加破缓存参数 t（见 ApiRoute.cacheBuster）。
+        assertEquals("/setting", recorded.requestUrl!!.encodedPath)
+        assertEquals("1700566805,${dev.jmx.client.core.protocol.JmxProtocolConstants.DefaultApiVersion}", recorded.headers["tokenparam"])
     }
 
     @Test
@@ -82,7 +86,10 @@ class JmxCoreTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to server.url("/").toString())
+                    mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )
                 ),
                 cookieStore = cookieStore,
                 apiClock = fixedClock(ts),
@@ -105,7 +112,10 @@ class JmxCoreTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to server.url("/").toString())
+                    mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )
                 ),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1)
@@ -134,7 +144,8 @@ class JmxCoreTest {
         server.enqueue(encryptedResponse(ts, """{"jm3_version":"2.2.0","img_host":"https://img.test","app_shunts":[]}"""))
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test")),
+                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test",
+                            "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,)),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())
@@ -152,7 +163,7 @@ class JmxCoreTest {
         assertEquals(2, core.sessionManager.cookies().count { it.value == "secret" })
         val settingRequest = server.takeRequest()
         assertEquals("AVS=secret", settingRequest.headers["Cookie"])
-        assertEquals("/setting", settingRequest.path)
+        assertEquals("/setting", settingRequest.requestUrl!!.encodedPath)
     }
 
     @Test
@@ -162,7 +173,10 @@ class JmxCoreTest {
         server.enqueue(encryptedResponse(ts, """{"jm3_version":"2.3.0","img_host":"https://img.test","app_shunts":[]}"""))
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to server.url("/").toString())),
+                keyValueStore = InMemoryKeyValueStore(mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())
@@ -175,7 +189,7 @@ class JmxCoreTest {
         assertTrue(result.settingFetch is InitStepResult.Success)
         assertTrue(!result.isFullySuccessful)
         assertEquals("2.3.0", core.protocolStateStore.apiVersion())
-        assertEquals("/setting", server.takeRequest().path)
+        assertEquals("/setting", server.takeRequest().requestUrl!!.encodedPath)
     }
 
     @Test
@@ -186,7 +200,8 @@ class JmxCoreTest {
                 keyValueStore = InMemoryKeyValueStore(
                     mapOf(
                         "protocol.api.version" to "2.5.0",
-                        "protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test"
+                        "protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test",
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION
                     )
                 ),
                 downloadConcurrency = 7,
@@ -225,7 +240,8 @@ class JmxCoreTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test")
+                    mapOf("protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test",
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION)
                 ),
                 cookieStore = cookieStore
             )
@@ -249,7 +265,8 @@ class JmxCoreTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test")
+                    mapOf("protocol.api.hosts" to "https://api-a.test\nhttps://api-b.test",
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION)
                 )
             )
         )
@@ -291,7 +308,8 @@ class JmxCoreTest {
         )
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test")),
+                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test",
+                            "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,)),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())
@@ -322,7 +340,7 @@ class JmxCoreTest {
         assertEquals(listOf("00001.webp"), report.chapterTemplate.valueOrNull()!!.imageFileNames)
         assertEquals("2.6.0", report.afterHealth.apiVersion)
         assertEquals(2, report.afterHealth.cookieCount)
-        assertEquals("/setting", server.takeRequest().path)
+        assertEquals("/setting", server.takeRequest().requestUrl!!.encodedPath)
         assertTrue(server.takeRequest().path!!.startsWith("/chapter_view_template?id=123&"))
     }
 
@@ -330,7 +348,10 @@ class JmxCoreTest {
     fun probeRunnerReportsMissingRequiredSession() {
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to server.url("/").toString())),
+                keyValueStore = InMemoryKeyValueStore(mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())
             )
@@ -363,7 +384,10 @@ class JmxCoreTest {
         server.enqueue(encryptedResponse(ts, """{"jm3_version":"2.7.0","img_host":"https://img.test","app_shunts":[]}"""))
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to server.url("/").toString())),
+                keyValueStore = InMemoryKeyValueStore(mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1)
             )
@@ -384,7 +408,7 @@ class JmxCoreTest {
         assertTrue(report.endpointProbe.isSuccessful)
         assertTrue(report.endpointProbe.valueOrNull()!!.single().success)
         assertEquals(1, report.afterHealth.endpoints.single().successCount)
-        assertEquals("/setting", server.takeRequest().path)
+        assertEquals("/setting", server.takeRequest().requestUrl!!.encodedPath)
     }
 
     @Test
@@ -404,7 +428,10 @@ class JmxCoreTest {
         )
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to server.url("/").toString())),
+                keyValueStore = InMemoryKeyValueStore(mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1)
             )
@@ -479,7 +506,8 @@ class JmxCoreTest {
         val outputStore = InMemoryImageOutputStore()
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test")),
+                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to "https://old.test",
+                            "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,)),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())
@@ -531,7 +559,7 @@ class JmxCoreTest {
         assertEquals("2.5.2", report.health.apiVersion)
         assertEquals(1, report.health.cookieCount)
         val requests = drainRecordedRequests(server)
-        assertEquals("/setting", requests[0].path)
+        assertEquals("/setting", requests[0].requestUrl!!.encodedPath)
         assertEquals("username=user&password=pass", requests[1].body.readUtf8())
         assertEquals("/album?id=321", requests[2].path)
         assertTrue(requests[3].path!!.startsWith("/chapter_view_template?id=123&"))
@@ -572,7 +600,10 @@ class JmxCoreTest {
         )
         val core = JmxCore.create(
             JmxCoreConfig(
-                keyValueStore = InMemoryKeyValueStore(mapOf("protocol.api.hosts" to server.url("/").toString())),
+                keyValueStore = InMemoryKeyValueStore(mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
                 domainServerUrls = listOf(domainServer.url("/domains").toString())

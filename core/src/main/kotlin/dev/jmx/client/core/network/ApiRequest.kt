@@ -7,7 +7,8 @@ data class ApiRequest(
     val query: Map<String, String?> = emptyMap(),
     val form: Map<String, String?> = emptyMap(),
     val headers: Map<String, String> = emptyMap(),
-    val requireSuccessCode: Boolean = true
+    val requireSuccessCode: Boolean = true,
+    val excludedEndpointUrl: String? = null
 )
 
 class ApiRequestBuilder(private val route: ApiRoute) {
@@ -15,6 +16,7 @@ class ApiRequestBuilder(private val route: ApiRoute) {
     private val form = linkedMapOf<String, String?>()
     private val headers = linkedMapOf<String, String>()
     private var requireSuccessCode: Boolean = true
+    private var excludedEndpointUrl: String? = null
 
     fun query(name: String, value: String?): ApiRequestBuilder = apply {
         putOrRemove(query, name, value)
@@ -44,13 +46,18 @@ class ApiRequestBuilder(private val route: ApiRoute) {
         requireSuccessCode = value
     }
 
+    fun excludeEndpointUrl(value: String?): ApiRequestBuilder = apply {
+        excludedEndpointUrl = value?.takeIf { it.isNotBlank() }
+    }
+
     fun build(): ApiRequest {
         return ApiRequest(
             route = route,
             query = query.toMap(),
             form = form.toMap(),
             headers = headers.toMap(),
-            requireSuccessCode = requireSuccessCode
+            requireSuccessCode = requireSuccessCode,
+            excludedEndpointUrl = excludedEndpointUrl
         )
     }
 
@@ -65,4 +72,20 @@ class ApiRequestBuilder(private val route: ApiRoute) {
 
 fun apiRequest(route: ApiRoute, configure: ApiRequestBuilder.() -> Unit = {}): ApiRequest {
     return ApiRequestBuilder(route).apply(configure).build()
+}
+
+/**
+ * 请求去重键：同一方法+路径+参数的并发请求视为同一请求。
+ * 不含 headers，避免登录态恢复重放时把不同会话的请求错误合并。
+ */
+fun ApiRequest.dedupKey(): String {
+    val queryPart = query.entries
+        .filter { it.value != null }
+        .sortedBy { it.key }
+        .joinToString("&") { "${it.key}=${it.value}" }
+    val formPart = form.entries
+        .filter { it.value != null }
+        .sortedBy { it.key }
+        .joinToString("&") { "${it.key}=${it.value}" }
+    return "${route.method.name} ${route.path}?$queryPart#$formPart"
 }

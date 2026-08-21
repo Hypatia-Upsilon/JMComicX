@@ -72,7 +72,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import dev.jmx.client.core.api.ActionResult
 import dev.jmx.client.core.api.AlbumDetail
 import dev.jmx.client.core.api.AlbumChapter
@@ -80,7 +80,11 @@ import dev.jmx.client.core.api.CommentItem
 import dev.jmx.client.core.api.CommentPage
 import dev.jmx.client.core.result.JmxResult
 import dev.jmx.client.core.runtime.JmxCore
+import dev.jmx.client.effect.BlurredBar
+import dev.jmx.client.effect.TopBarBlurStyle
+import dev.jmx.client.effect.rememberBarBackdrop
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -110,6 +114,8 @@ import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.icon.extended.Back
@@ -144,6 +150,7 @@ internal fun AlbumDetailTransitionHost(
     onSearchRequested: (String) -> Unit,
     onStartReading: (ReaderLaunchRequest) -> Unit,
     onDismiss: () -> Unit,
+    topBarBlurStyle: TopBarBlurStyle = TopBarBlurStyle.GAUSSIAN,
 ) {
     val transitionProgress = remember(request.album.id) { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
@@ -230,6 +237,7 @@ internal fun AlbumDetailTransitionHost(
                 (hasEntered && progress >= 0.999f && !isExiting),
             onBack = { exitDetail() },
             onCoverTargetChanged = { bounds -> targetBounds = bounds },
+            topBarBlurStyle = topBarBlurStyle,
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(2f)
@@ -288,6 +296,7 @@ private fun AlbumDetailScreen(
     showCover: Boolean,
     onBack: () -> Unit,
     onCoverTargetChanged: (Rect) -> Unit,
+    topBarBlurStyle: TopBarBlurStyle = TopBarBlurStyle.GAUSSIAN,
     modifier: Modifier = Modifier,
 ) {
     var state by remember(album.id) { mutableStateOf<AlbumDetailUiState>(AlbumDetailUiState.Loading) }
@@ -308,6 +317,7 @@ private fun AlbumDetailScreen(
     var showBookshelfGroupPicker by remember(album.id) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     val hapticFeedback = LocalHapticFeedback.current
+    val pageBackdrop = rememberBarBackdrop()
 
     LaunchedEffect(album.id, repository, retryKey) {
         val loaded = repository.load(album.id)
@@ -503,14 +513,21 @@ private fun AlbumDetailScreen(
 
     Scaffold(
         modifier = modifier,
+        containerColor = Color.Transparent,
         topBar = {
-            AlbumDetailTopBar(
-                title = when (val current = state) {
-                    is AlbumDetailUiState.Content -> current.detail.name ?: album.name
-                    else -> album.name
-                },
-                onBack = onBack,
-            )
+            BlurredBar(
+                backdrop = pageBackdrop,
+                style = topBarBlurStyle,
+            ) {
+                AlbumDetailTopBar(
+                    title = when (val current = state) {
+                        is AlbumDetailUiState.Content -> current.detail.name ?: album.name
+                        else -> album.name
+                    },
+                    onBack = onBack,
+                    transparent = pageBackdrop != null,
+                )
+            }
         },
         floatingActionButton = {
             FloatingActionButton(
@@ -577,6 +594,7 @@ private fun AlbumDetailScreen(
             pageSummary = pageSummary,
             showCover = showCover,
             innerPadding = innerPadding,
+            backdrop = pageBackdrop,
             onCoverTargetChanged = onCoverTargetChanged,
             onChapterSelected = { chapter ->
                 val content = state as? AlbumDetailUiState.Content
@@ -636,8 +654,9 @@ private fun AlbumDetailScreen(
 private fun AlbumDetailTopBar(
     title: String,
     onBack: () -> Unit,
+    transparent: Boolean = false,
 ) {
-    Surface(color = MiuixTheme.colorScheme.surface) {
+    Surface(color = if (transparent) Color.Transparent else MiuixTheme.colorScheme.surface) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -679,6 +698,7 @@ private fun DetailBody(
     pageSummary: AlbumPageSummary,
     showCover: Boolean,
     innerPadding: PaddingValues,
+    backdrop: LayerBackdrop? = null,
     onCoverTargetChanged: (Rect) -> Unit,
     onChapterSelected: (AlbumChapter) -> Unit,
     onLoadMoreComments: () -> Unit,
@@ -725,6 +745,7 @@ private fun DetailBody(
         state = listState,
         modifier = Modifier
             .fillMaxSize()
+            .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
             .background(MiuixTheme.colorScheme.surface)
             .pointerInput(selectedTab) {
                 var dragDistance = 0f
@@ -1616,12 +1637,13 @@ internal class AlbumDetailRepository(
             )
         }
 
-    suspend fun load(albumId: String): AlbumDetailUiState {
+    /** 详情映射（章节表、标签、`toRawMap`）也不轻，整段留在 IO 线程上，别在主线程上组装。 */
+    suspend fun load(albumId: String): AlbumDetailUiState = withContext(Dispatchers.IO) {
         try {
             val detailResult = withTimeoutOrNull(DETAIL_REQUEST_TIMEOUT_MILLIS) {
                 core.albumApi.detailFull(albumId)
-            } ?: return AlbumDetailUiState.Error("详情请求超时，请检查网络或切换线路后重试。")
-            return when (detailResult) {
+            } ?: return@withContext AlbumDetailUiState.Error("详情请求超时，请检查网络或切换线路后重试。")
+            when (detailResult) {
                 is JmxResult.Success -> AlbumDetailUiState.Content(
                     detail = detailResult.value,
                     comments = DetailCommentsState(isLoading = true),
@@ -1631,7 +1653,7 @@ internal class AlbumDetailRepository(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            return AlbumDetailUiState.Error(error.message ?: "详情加载出现未知异常。")
+            AlbumDetailUiState.Error(error.message ?: "详情加载出现未知异常。")
         }
     }
 

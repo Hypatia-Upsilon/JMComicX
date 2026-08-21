@@ -7,6 +7,7 @@ import dev.jmx.client.core.api.LibraryApi
 import dev.jmx.client.core.api.SettingApi
 import dev.jmx.client.core.api.UserApi
 import dev.jmx.client.core.cache.InMemoryKeyValueStore
+import dev.jmx.client.core.cache.JsonResponseCache
 import dev.jmx.client.core.cache.KeyValueStore
 import dev.jmx.client.core.cache.ProtocolStateStore
 import dev.jmx.client.core.download.BinaryDownloader
@@ -14,14 +15,20 @@ import dev.jmx.client.core.download.ChapterDownloadTaskManager
 import dev.jmx.client.core.download.ChapterDownloadTaskStore
 import dev.jmx.client.core.download.DownloadBatchRunner
 import dev.jmx.client.core.download.TaskExecutionPolicy
+import dev.jmx.client.core.image.ImageHostRegistry
+import dev.jmx.client.core.image.imageOkHttpClient
 import dev.jmx.client.core.network.ApiEndpointManager
 import dev.jmx.client.core.network.ApiEndpointProber
 import dev.jmx.client.core.network.ApiEndpointSelection
+import dev.jmx.client.core.network.DefaultResponseCachePolicy
 import dev.jmx.client.core.network.DefaultRetryPolicy
 import dev.jmx.client.core.network.DomainRefresher
 import dev.jmx.client.core.network.JmxApiClient
 import dev.jmx.client.core.network.JmxHttpClient
+import dev.jmx.client.core.network.RequestMetricsRecorder
+import dev.jmx.client.core.network.ResponseCachePolicy
 import dev.jmx.client.core.network.RetryPolicy
+import dev.jmx.client.core.network.apiOkHttpClient
 import dev.jmx.client.core.network.defaultOkHttpClient
 import dev.jmx.client.core.protocol.ApiClock
 import dev.jmx.client.core.protocol.ApiTokenProvider
@@ -32,7 +39,12 @@ import dev.jmx.client.core.session.CookieStore
 import dev.jmx.client.core.session.InMemoryCookieStore
 import dev.jmx.client.core.session.SessionManager
 import dev.jmx.client.core.session.StoreBackedCookieJar
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.nio.file.Path
 
 data class JmxCoreConfig(
     val keyValueStore: KeyValueStore = InMemoryKeyValueStore(),
@@ -43,6 +55,18 @@ data class JmxCoreConfig(
     val downloadConcurrency: Int = 4,
     val domainServerUrls: List<String> = JmxProtocolConstants.DomainServerUrls,
 
+    /** 内容语言（"CN"/"TW"等）；非空时为所有 GET 请求附加 lang 查询参数，null/空 表示不附加 */
+    val contentLanguageProvider: () -> String? = { null },
+
+    /**
+     * 接口 JSON 响应的磁盘缓存目录。为 null 表示不启用缓存（默认，测试与诊断工具保持纯网络行为）。
+     * 客户端应传入应用缓存目录下的子目录，例如 `context.cacheDir/api_json_cache`。
+     */
+    val responseCacheDirectory: Path? = null,
+
+    /** 哪些路由缓存、缓存多久。仅在 [responseCacheDirectory] 非 null 时生效。 */
+    val responseCachePolicy: ResponseCachePolicy = DefaultResponseCachePolicy(),
+
     val chapterDownloadTaskStore: ChapterDownloadTaskStore? = null,
     val taskExecutionPolicy: TaskExecutionPolicy = TaskExecutionPolicy()
 )
@@ -51,6 +75,10 @@ class JmxCore private constructor(
     val protocolStateStore: ProtocolStateStore,
     val apiVersionProvider: StoredApiVersionProvider,
     val endpointManager: ApiEndpointManager,
+    /** 图片 CDN 的线路表；封面与阅读器据此选机器，[imageHttpClient] 据此换机。 */
+    val imageHostRegistry: ImageHostRegistry,
+    /** 共享的基础客户端（连接池 / DNS 缓存都在这一层）。图片客户端由它派生。 */
+    val httpTransport: OkHttpClient,
     val sessionManager: SessionManager,
     val httpClient: JmxHttpClient,
     val apiClient: JmxApiClient,
@@ -61,14 +89,24 @@ class JmxCore private constructor(
     val interactionApi: InteractionApi,
     val libraryApi: LibraryApi,
     val domainRefresher: DomainRefresher,
+    val requestMetricsRecorder: RequestMetricsRecorder = RequestMetricsRecorder(),
     val endpointProber: ApiEndpointProber,
     val initializer: JmxCoreInitializer,
+    /** 接口 JSON 响应缓存；[JmxCoreConfig.responseCacheDirectory] 为 null 时为 null。 */
+    val responseCache: JsonResponseCache? = null,
     val downloader: BinaryDownloader,
     val downloadBatchRunner: DownloadBatchRunner,
     private val domainServerUrls: List<String>,
     chapterDownloadTaskStore: ChapterDownloadTaskStore? = null,
     taskExecutionPolicy: TaskExecutionPolicy = TaskExecutionPolicy()
 ) {
+    /**
+     * 图片专用客户端（更宽的分发器 + 选路拦截器）。
+     *
+     * 懒加载：只有真的要显示图片的进程才需要它，诊断工具与单测不必为此多建一个线程池。
+     */
+    val imageHttpClient: OkHttpClient by lazy { imageOkHttpClient(httpTransport, imageHostRegistry) }
+
     val smokeRunner: JmxCoreSmokeRunner = JmxCoreSmokeRunner(this)
     val probeRunner: JmxCoreProbeRunner = JmxCoreProbeRunner(this)
     val connectivityRunner: JmxLiveConnectivityRunner = JmxLiveConnectivityRunner(this)
@@ -86,8 +124,6 @@ class JmxCore private constructor(
             executionPolicy = taskExecutionPolicy
         )
     }
-    val diagnosticExporter: JmxDiagnosticExporter = JmxDiagnosticExporter(this)
-
     fun healthSnapshot(): JmxCoreHealth {
         val nowMillis = System.currentTimeMillis()
         return JmxCoreHealth(
@@ -116,9 +152,18 @@ class JmxCore private constructor(
     }
 
     private fun ApiEndpointSelection.toHealth(): EndpointSelectionHealth {
+        val sessionUrl = endpointManager.sessionEndpoint()?.toString()
         return when (this) {
-            ApiEndpointSelection.Auto -> EndpointSelectionHealth(mode = "auto", manualUrl = null)
-            is ApiEndpointSelection.Manual -> EndpointSelectionHealth(mode = "manual", manualUrl = url.toString())
+            ApiEndpointSelection.Auto -> EndpointSelectionHealth(
+                mode = "auto",
+                manualUrl = null,
+                sessionUrl = sessionUrl
+            )
+            is ApiEndpointSelection.Manual -> EndpointSelectionHealth(
+                mode = "manual",
+                manualUrl = url.toString(),
+                sessionUrl = sessionUrl
+            )
         }
     }
 
@@ -127,50 +172,82 @@ class JmxCore private constructor(
             val protocolStateStore = ProtocolStateStore(config.keyValueStore)
             val apiVersionProvider = StoredApiVersionProvider(protocolStateStore)
             val endpointManager = ApiEndpointManager(protocolStateStore = protocolStateStore)
+            val imageHostRegistry = ImageHostRegistry(protocolStateStore = protocolStateStore)
             val sessionManager = SessionManager(config.cookieStore)
             val cookieJar = StoreBackedCookieJar(config.cookieStore)
             val okHttpClient = config.okHttpClient ?: defaultOkHttpClient(cookieJar)
+            // 接口请求额外套一层整次调用时限；图片下载继续用基础客户端（见 apiOkHttpClient 注释）。
+            val apiHttpTransport = apiOkHttpClient(okHttpClient)
             val tokenProvider = ApiTokenProvider(
                 clock = config.apiClock,
                 apiVersionProvider = apiVersionProvider
             )
+            val requestMetricsRecorder = RequestMetricsRecorder()
             val httpClient = JmxHttpClient(
                 endpointManager = endpointManager,
                 tokenProvider = tokenProvider,
-                okHttpClient = okHttpClient,
-                retryPolicy = config.retryPolicy
+                okHttpClient = apiHttpTransport,
+                retryPolicy = config.retryPolicy,
+                requestMetricsRecorder = requestMetricsRecorder,
+                queryLanguageProvider = config.contentLanguageProvider
             )
-            val apiClient = JmxApiClient(httpClient)
-            val downloader = BinaryDownloader(okHttpClient = okHttpClient)
+            // 后台校验与后台域名刷新共用：SupervisorJob 保证一个任务失败不牵连其他，
+            // 生命周期与 JmxCore 相同（单例，随进程结束）。
+            val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val responseCache = config.responseCacheDirectory?.let { JsonResponseCache(directory = it) }
+            val apiClient = JmxApiClient(
+                httpClient = httpClient,
+                responseCache = responseCache,
+                cachePolicy = responseCache?.let { config.responseCachePolicy },
+                revalidationScope = backgroundScope,
+                // 语言不在 dedupKey 里（由 JmxHttpClient 出网前追加），必须进缓存键；
+                // API 版本一变说明协议换代，旧缓存内容一并作废。
+                cacheNamespace = { config.contentLanguageProvider().orEmpty() },
+                cacheGeneration = { apiVersionProvider.current() }
+            )
+            val downloader = BinaryDownloader(
+                okHttpClient = okHttpClient,
+                // 与取图路径共用同一张线路表：下载踩过的坑，阅读器与封面预热不用再踩一遍。
+                imageHostRegistry = imageHostRegistry
+            )
             val albumApi = AlbumApi(apiClient)
             val chapterApi = ChapterApi(apiClient)
-            val settingApi = SettingApi(apiClient, apiVersionProvider)
+            val settingApi = SettingApi(
+                apiClient = apiClient,
+                apiVersionProvider = apiVersionProvider,
+                onApiVersionChanged = { version ->
+                    // 目录遍历 + 删除，放后台执行，不占初始化这条关键路径。
+                    responseCache?.let { cache -> backgroundScope.launch { cache.invalidateOtherGenerations(version) } }
+                }
+            )
             val userApi = UserApi(
                 apiClient = apiClient,
                 sessionManager = sessionManager,
                 sessionSyncHosts = {
                     endpointManager.all().map { it.url.toString() }
                 },
-                endpointManager = endpointManager,
-                pinEndpointOnLogin = false
+                endpointManager = endpointManager
             )
             val interactionApi = InteractionApi(apiClient)
             val libraryApi = LibraryApi(apiClient)
             val domainRefresher = DomainRefresher(
                 endpointManager = endpointManager,
-                okHttpClient = okHttpClient,
+                okHttpClient = apiHttpTransport,
                 serverUrls = config.domainServerUrls,
                 sessionManager = sessionManager
             )
             val endpointProber = ApiEndpointProber(
                 endpointManager = endpointManager,
                 tokenProvider = tokenProvider,
-                okHttpClient = okHttpClient
+                okHttpClient = apiHttpTransport,
+                queryLanguageProvider = config.contentLanguageProvider
             )
             return JmxCore(
                 protocolStateStore = protocolStateStore,
                 apiVersionProvider = apiVersionProvider,
                 endpointManager = endpointManager,
+                imageHostRegistry = imageHostRegistry,
+                httpTransport = okHttpClient,
                 sessionManager = sessionManager,
                 httpClient = httpClient,
                 apiClient = apiClient,
@@ -181,8 +258,16 @@ class JmxCore private constructor(
                 interactionApi = interactionApi,
                 libraryApi = libraryApi,
                 domainRefresher = domainRefresher,
+                requestMetricsRecorder = requestMetricsRecorder,
                 endpointProber = endpointProber,
-                initializer = JmxCoreInitializer(domainRefresher, settingApi),
+                initializer = JmxCoreInitializer(
+                    domainRefresher = domainRefresher,
+                    settingApi = settingApi,
+                    // 上次运行留下过用得通的主机 => 走热启动，不再让域名刷新挡住首页。
+                    hasPersistedApiHost = { protocolStateStore.preferredAutoApiHost() != null },
+                    backgroundScope = backgroundScope
+                ),
+                responseCache = responseCache,
                 downloader = downloader,
                 downloadBatchRunner = DownloadBatchRunner(downloader, config.downloadConcurrency),
                 domainServerUrls = config.domainServerUrls,

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.jmx.client.core.api.DailyCheckInfo
+import dev.jmx.client.core.result.JmxError
 import dev.jmx.client.core.result.JmxResult
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -57,6 +59,7 @@ internal fun DailyCheckScreen(
     innerPadding: PaddingValues,
     profile: AccountProfile,
     repository: AccountDataRepository,
+    onRequireLogin: () -> Unit,
 ) {
     var state by remember(profile.id) { mutableStateOf<DailyUiState>(DailyUiState.Loading) }
     var retryKey by remember(profile.id) { mutableIntStateOf(0) }
@@ -66,8 +69,14 @@ internal fun DailyCheckScreen(
 
     suspend fun reload() {
         state = when (val result = repository.dailyInfo(profile)) {
-            is JmxResult.Success -> DailyUiState.Content(result.value)
-            is JmxResult.Failure -> DailyUiState.Error(result.error.toUiMessage())
+            is JmxResult.Success -> result.value?.let { DailyUiState.Content(it) }
+                ?: DailyUiState.NoEvent
+            is JmxResult.Failure -> {
+                // 自动重登都救不回来，说明本地凭据也过期了：与收藏页保持同一套提示与跳转，
+                // 而不是把底层的"服务端没返回数据"直接摊给用户。
+                if (result.error.requiresSessionRecovery()) onRequireLogin()
+                DailyUiState.Error(result.error.toCheckInUiMessage())
+            }
         }
     }
 
@@ -80,6 +89,9 @@ internal fun DailyCheckScreen(
     ) {
         when (val current = state) {
             DailyUiState.Loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            DailyUiState.NoEvent -> DailyNoEventMessage(
+                onRetry = { retryKey++ },
+            )
             is DailyUiState.Error -> CollectionMessageForDaily(
                 current.message,
                 onRetry = { retryKey++ },
@@ -194,7 +206,8 @@ internal fun DailyCheckScreen(
                                                     }
                                                 }
                                                 is JmxResult.Failure -> {
-                                                    actionMessage = result.error.toUiMessage()
+                                                    if (result.error.requiresSessionRecovery()) onRequireLogin()
+                                                    actionMessage = result.error.toCheckInUiMessage()
                                                 }
                                             }
                                             checking = false
@@ -454,10 +467,48 @@ private fun CollectionMessageForDaily(message: String, onRetry: () -> Unit) {
     }
 }
 
+@Composable
+private fun DailyNoEventMessage(onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "当期暂无签到活动",
+            style = MiuixTheme.textStyles.title3,
+            color = MiuixTheme.colorScheme.onSurface,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "活动开始后会自动展示，可下拉重试",
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            textAlign = TextAlign.Center,
+        )
+        TextButton(text = "重新查询", onClick = onRetry)
+    }
+}
+
 private sealed interface DailyUiState {
     data object Loading : DailyUiState
+    data object NoEvent : DailyUiState
     data class Error(val message: String) : DailyUiState
     data class Content(val info: DailyCheckInfo) : DailyUiState
+}
+
+/**
+ * 签到路径的失败提示。
+ *
+ * 会话失效与收藏页统一措辞——签到接口在掉登录时回的是空载荷而不是 401，
+ * 若照搬通用文案，用户看到的会是"服务端未返回数据"，完全指不到"去重新登录"这一步。
+ * 走到这里的空载荷已经过一次自动重登验证，说的确实是服务端这次没给内容，
+ * 因此保留底层描述，便于判断是不是活动本身结束了。
+ */
+private fun JmxError.toCheckInUiMessage(): String = when {
+    requiresSessionRecovery() -> "登录状态已失效，请重新登录"
+    this is JmxError.EmptyData -> message.ifBlank { "服务端暂时没有返回数据" }
+    else -> toUiMessage()
 }
 
 private val WEEK_LABELS = listOf("一", "二", "三", "四", "五", "六", "日")

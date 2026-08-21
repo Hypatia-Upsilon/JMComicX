@@ -28,9 +28,19 @@ import androidx.compose.ui.unit.dp
 import dev.jmx.client.core.result.JmxResult
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
+import top.yukonga.miuix.kmp.basic.DropdownImpl
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Sort
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.window.WindowListPopup
 
 @Composable
 internal fun AccountCollectionScreen(
@@ -41,13 +51,18 @@ internal fun AccountCollectionScreen(
     liftedAlbumId: String?,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
     onRequireLogin: () -> Unit,
+    backdrop: LayerBackdrop? = null,
+    favoriteOrder: FavoriteSortOrder = FavoriteSortOrder.Default,
 ) {
-    var state by remember(kind) { mutableStateOf<AccountCollectionState>(AccountCollectionState.Loading) }
-    var retryKey by remember(kind) { mutableIntStateOf(0) }
+    // 换排序等于换一份列表：连 retryKey 一起重置，让页面立刻回到加载态而不是把旧顺序留在屏上。
+    var state by remember(kind, favoriteOrder) {
+        mutableStateOf<AccountCollectionState>(AccountCollectionState.Loading)
+    }
+    var retryKey by remember(kind, favoriteOrder) { mutableIntStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(kind, retryKey, sessionRevision, repository) {
-        state = when (val result = repository.loadCollection(kind, page = 1)) {
+    LaunchedEffect(kind, favoriteOrder, retryKey, sessionRevision, repository) {
+        state = when (val result = repository.loadCollection(kind, page = 1, favoriteOrder = favoriteOrder)) {
             is JmxResult.Success -> {
                 val total = result.value.total
                 AccountCollectionState.Content(
@@ -76,7 +91,7 @@ internal fun AccountCollectionScreen(
         if (content.loadingMore || content.endReached) return
         state = content.copy(loadingMore = true, loadMoreError = null)
         coroutineScope.launch {
-            val result = repository.loadCollection(kind, content.nextPage)
+            val result = repository.loadCollection(kind, content.nextPage, favoriteOrder)
             val latest = state as? AccountCollectionState.Content ?: return@launch
             state = when (result) {
                 is JmxResult.Success -> {
@@ -110,6 +125,7 @@ internal fun AccountCollectionScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
             .background(MiuixTheme.colorScheme.surface),
     ) {
         when (val current = state) {
@@ -131,6 +147,51 @@ internal fun AccountCollectionScreen(
                     onAlbumSelected = onAlbumSelected,
                     onLoadMore = ::loadMore,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * 收藏页顶栏右上角的排序下拉菜单。
+ *
+ * 排序由服务端完成（`o` 参数），所以选完必须重新拉第一页——收藏摘要里没有任何时间字段，
+ * 本地排不出来。
+ */
+@Composable
+internal fun FavoriteSortAction(
+    order: FavoriteSortOrder,
+    onOrderSelected: (FavoriteSortOrder) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = FavoriteSortOrder.entries
+    // 弹窗要用锚点（父布局）的位置定位，所以必须和 IconButton 同处一个 Box。
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                imageVector = MiuixIcons.Sort,
+                contentDescription = "排序方式：${order.label}",
+                tint = MiuixTheme.colorScheme.onBackground,
+            )
+        }
+        WindowListPopup(
+            show = expanded,
+            alignment = PopupPositionProvider.Align.End,
+            onDismissRequest = { expanded = false },
+        ) {
+            ListPopupColumn {
+                options.forEachIndexed { index, option ->
+                    DropdownImpl(
+                        text = option.label,
+                        optionSize = options.size,
+                        isSelected = option == order,
+                        index = index,
+                        onSelectedIndexChange = { selectedIndex ->
+                            expanded = false
+                            options.getOrNull(selectedIndex)?.let(onOrderSelected)
+                        },
+                    )
+                }
             }
         }
     }

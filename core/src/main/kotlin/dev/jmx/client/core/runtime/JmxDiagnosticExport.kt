@@ -2,7 +2,6 @@ package dev.jmx.client.core.runtime
 
 import dev.jmx.client.core.result.JmxError
 import dev.jmx.client.core.result.JmxResult
-import dev.jmx.client.core.result.describe
 import dev.jmx.client.core.session.SessionManager
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -56,6 +55,8 @@ class JmxDiagnosticExporter(
                 entries["download-tasks.txt"] = renderTaskSummary(core)
                     .toByteArray(StandardCharsets.UTF_8)
             }
+            entries["request-metrics.txt"] = renderRequestMetrics(core)
+                .toByteArray(StandardCharsets.UTF_8)
             entries["redaction-note.txt"] = (
                 "This package is redacted.\n" +
                     "No passwords, AVS values, or raw cookie values are included.\n" +
@@ -102,6 +103,8 @@ class JmxDiagnosticExporter(
                 entries["download-tasks.txt"] = renderTaskSummary(core)
                     .toByteArray(StandardCharsets.UTF_8)
             }
+            entries["request-metrics.txt"] = renderRequestMetrics(core)
+                .toByteArray(StandardCharsets.UTF_8)
             entries["redaction-note.txt"] = "redacted package\n".toByteArray(StandardCharsets.UTF_8)
             zipEntries(entries) to entries.keys.toList()
         }.fold(
@@ -110,11 +113,37 @@ class JmxDiagnosticExporter(
         )
     }
 
+    private fun renderRequestMetrics(core: JmxCore): String {
+        return buildString {
+            appendLine("deduplicatedRequests=${core.apiClient.deduplicatedRequestCount}")
+            val summaries = core.requestMetricsRecorder.summarize()
+            appendLine("routes=${summaries.size}")
+            summaries.forEach { s ->
+                appendLine(
+                    "route=${sanitizeDiagnosticText(s.route)} count=${s.requestCount} " +
+                        "fail=${s.failureCount} avgMs=${s.averageDurationMillis} " +
+                        "maxMs=${s.maxDurationMillis} retries=${s.retryCount}"
+                )
+            }
+            appendLine("recentFailures:")
+            core.requestMetricsRecorder.snapshot()
+                .filter { !it.success }
+                .takeLast(20)
+                .forEach { r ->
+                    appendLine(
+                        "  route=${sanitizeDiagnosticText(r.route)} host=${sanitizeDiagnosticText(r.endpointHost)} " +
+                            "attempts=${r.attempts} durationMs=${r.durationMillis} error=${r.errorKind ?: "unknown"}"
+                    )
+                }
+        }
+    }
+
     private fun renderHealthText(report: JmxDiagnosticReport): String {
         return buildString {
             appendLine("apiVersion=${sanitizeDiagnosticText(report.health.apiVersion)}")
             appendLine("endpointMode=${report.health.endpointSelection.mode}")
             appendLine("manualEndpoint=${sanitizeNullable(report.health.endpointSelection.manualUrl)}")
+            appendLine("sessionEndpoint=${sanitizeNullable(report.health.endpointSelection.sessionUrl)}")
             appendLine("cookieCount=${report.health.cookieCount}")
             appendLine("downloadConcurrency=${report.health.downloadConcurrency}")
             appendLine("endpoints=${report.health.endpoints.size}")

@@ -112,10 +112,6 @@ class LibraryApi(
         return JmxResult.Success(root.toWeekInfo())
     }
 
-    suspend fun weekRaw(): JmxResult<Map<String, Any?>> {
-        return rawObject(ApiRoute.Week)
-    }
-
     suspend fun weekFilter(page: Int, categoryId: String, typeId: String): JmxResult<AlbumPage> {
         return albumPage(ApiRoute.WeekFilter) {
             queryAtLeast("page", page, minimum = 1)
@@ -191,21 +187,72 @@ class LibraryApi(
         return JmxResult.Success(root.toCommentPage())
     }
 
-    suspend fun dailyInfo(userId: String): JmxResult<DailyCheckInfo> {
+    /**
+     * 查询签到活动。Success(null) 表示服务端确认没有进行中的签到活动（空载荷）：
+     * 首次遇到空载荷会换一条线路交叉验证，两条线路都为空才认定无活动，
+     * 之后同一进程内不再重复交叉验证。
+     */
+    suspend fun dailyInfo(userId: String): JmxResult<DailyCheckInfo?> {
         if (userId.isBlank()) return JmxResult.Failure(JmxError.Schema("userId is blank", field = "userId"))
-        val data = when (
-            val result = apiClient.requestJson(
+        return when (val outcome = requestDailyData(userId, excludedEndpointUrl = null)) {
+            is DailyDataOutcome.Data -> JmxResult.Success(outcome.root.toDailyCheckInfo())
+            is DailyDataOutcome.Empty -> resolveEmptyDailyPayload(userId, outcome.usedEndpointUrl)
+            is DailyDataOutcome.Error -> JmxResult.Failure(outcome.error)
+        }
+    }
+
+    @Volatile
+    private var dailyEmptyPayloadConfirmedAcrossEndpoints = false
+
+    private suspend fun resolveEmptyDailyPayload(
+        userId: String,
+        usedEndpointUrl: String?
+    ): JmxResult<DailyCheckInfo?> {
+        if (usedEndpointUrl == null || dailyEmptyPayloadConfirmedAcrossEndpoints) {
+            return JmxResult.Success(null)
+        }
+        return when (val retry = requestDailyData(userId, excludedEndpointUrl = usedEndpointUrl)) {
+            is DailyDataOutcome.Data -> JmxResult.Success(retry.root.toDailyCheckInfo())
+            is DailyDataOutcome.Empty -> {
+                dailyEmptyPayloadConfirmedAcrossEndpoints = true
+                JmxResult.Success(null)
+            }
+            is DailyDataOutcome.Error -> JmxResult.Failure(retry.error)
+        }
+    }
+
+    private suspend fun requestDailyData(userId: String, excludedEndpointUrl: String?): DailyDataOutcome {
+        return when (
+            val result = apiClient.requestJsonResponse(
                 apiRequest(ApiRoute.Daily) {
                     query("user_id", userId)
+                    excludeEndpointUrl(excludedEndpointUrl)
                 }
             )
         ) {
-            is JmxResult.Success -> result.value
-            is JmxResult.Failure -> return result
+            is JmxResult.Failure -> when (result.error) {
+                is JmxError.EmptyData -> DailyDataOutcome.Empty(
+                    usedEndpointUrl = result.error.exchange?.requestUrl
+                )
+                else -> DailyDataOutcome.Error(result.error)
+            }
+            is JmxResult.Success -> {
+                val element = result.value.data
+                when {
+                    element.isJsonObject -> DailyDataOutcome.Data(element.asJsonObject)
+                    element.isJsonNull -> DailyDataOutcome.Empty(
+                        usedEndpointUrl = result.value.exchange.requestUrl
+                    )
+                    else -> DailyDataOutcome.Error(JmxError.Schema("daily data is not an object"))
+                }
+            }
         }
-        val root = data.asObjectOrNull()
-            ?: return JmxResult.Failure(JmxError.Schema("daily data is not an object"))
-        return JmxResult.Success(root.toDailyCheckInfo())
+    }
+
+    private sealed interface DailyDataOutcome {
+        data class Data(val root: com.google.gson.JsonObject) : DailyDataOutcome
+        data class Empty(val usedEndpointUrl: String?) : DailyDataOutcome
+        data class Error(val error: JmxError) : DailyDataOutcome
     }
 
     suspend fun dailyCheck(userId: String, dailyId: String): JmxResult<ActionResult> {

@@ -21,7 +21,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,21 +41,22 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.imageLoader
-import coil.request.ImageRequest
-import coil.size.Precision
+import coil3.ImageLoader
+import coil3.compose.AsyncImage
+import coil3.imageLoader
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import coil3.size.Precision
 import dev.jmx.client.core.api.AlbumSummary
 import dev.jmx.client.core.api.HomePromoteSection
 import dev.jmx.client.core.image.ImageUrl
@@ -64,6 +65,9 @@ import dev.jmx.client.core.result.JmxResult
 import dev.jmx.client.core.runtime.InitStepResult
 import dev.jmx.client.core.runtime.JmxCore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -71,16 +75,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.Headers
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Surface
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Image
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -88,32 +93,30 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 internal fun HomeScreen(
     innerPadding: PaddingValues,
+    backdrop: LayerBackdrop? = null,
     state: HomeUiState,
     isRefreshing: Boolean,
-    selectedCategoryIndex: Int,
-    onCategorySelected: (Int) -> Unit,
+    pagerState: PagerState,
     liftedAlbumId: String?,
     onLoadMore: (String) -> Unit,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(innerPadding),
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
         when (state) {
             HomeUiState.Loading -> LoadingHome()
             is HomeUiState.Content -> HomeContent(
                 categories = state.categories,
-                selectedCategoryIndex = selectedCategoryIndex,
-                onCategorySelected = onCategorySelected,
+                pagerState = pagerState,
                 liftedAlbumId = liftedAlbumId,
                 onLoadMore = onLoadMore,
                 onAlbumSelected = onAlbumSelected,
                 isRefreshing = isRefreshing,
                 onRefresh = onRefresh,
+                backdrop = backdrop,
+                topInset = innerPadding.calculateTopPadding(),
+                bottomInset = innerPadding.calculateBottomPadding(),
             )
             is HomeUiState.Empty -> EmptyState(
                 title = "暂无推荐",
@@ -132,41 +135,26 @@ internal fun HomeScreen(
 @Composable
 private fun HomeContent(
     categories: List<HomeCategory>,
-    selectedCategoryIndex: Int,
-    onCategorySelected: (Int) -> Unit,
+    pagerState: PagerState,
     liftedAlbumId: String?,
     onLoadMore: (String) -> Unit,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
+    backdrop: LayerBackdrop?,
+    topInset: Dp,
+    bottomInset: Dp,
 ) {
-    val safeSelectedIndex = selectedCategoryIndex.coerceIn(categories.indices)
-    val pagerState = rememberPagerState(initialPage = safeSelectedIndex) { categories.size }
-    val coroutineScope = rememberCoroutineScope()
-    val categoryTabWidth = rememberCategoryTabWidth(categories)
-
-    LaunchedEffect(pagerState.settledPage) {
-        if (pagerState.settledPage != selectedCategoryIndex) {
-            onCategorySelected(pagerState.settledPage)
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        TabRowWithContour(
-            tabs = categories.map { it.title },
-            selectedTabIndex = pagerState.currentPage,
-            onTabSelected = { index ->
-                coroutineScope.launch { pagerState.animateScrollToPage(index) }
-            },
-            minWidth = categoryTabWidth,
-            maxWidth = categoryTabWidth,
-            modifier = Modifier.padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
-        )
+    // 分页状态由调用方（JmxApp）持有：顶栏标签行与这里的 HorizontalPager 共用同一个
+    // PagerState，标签的选中态与指示器位置直接来自分页器的实时进度。此前是"顶栏索引"与
+    // "分页状态"两份状态互相回写，且回写用的是 settledPage（惯性停稳后才更新），
+    // 手动滑动时顶栏要等分页彻底停下才跟上，观感上就是切换慢、有间隔、割裂。
+    Box(modifier = Modifier.fillMaxSize()) {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+                .fillMaxSize()
+                .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier),
             key = { categories[it].id },
         ) { page ->
             val pullToRefreshState = rememberPullToRefreshState()
@@ -182,27 +170,12 @@ private fun HomeContent(
                     onLoadMore = onLoadMore,
                     onAlbumSelected = onAlbumSelected,
                     liftedAlbumId = liftedAlbumId,
+                    topInset = topInset,
+                    bottomInset = bottomInset,
                 )
             }
         }
     }
-}
-
-@Composable
-private fun rememberCategoryTabWidth(categories: List<HomeCategory>): Dp {
-    val textMeasurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    val textStyle = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Bold)
-    val widestTextPx = categories.maxOf { category ->
-        textMeasurer.measure(
-            text = category.title,
-            style = textStyle,
-            maxLines = 1,
-        ).size.width
-    }
-    return with(density) { widestTextPx.toDp() }
-        .plus(24.dp)
-        .coerceIn(84.dp, 160.dp)
 }
 
 @Composable
@@ -211,6 +184,8 @@ private fun HomeAlbumGrid(
     onLoadMore: (String) -> Unit,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
     liftedAlbumId: String?,
+    topInset: Dp,
+    bottomInset: Dp,
 ) {
     val gridState = rememberLazyGridState()
     val footerKey = remember(category.id) { "home-footer:${category.id}" }
@@ -228,7 +203,7 @@ private fun HomeAlbumGrid(
             .semantics {
                 contentDescription = "${category.title}漫画列表，共${category.albums.size}部"
             },
-        contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 28.dp),
+        contentPadding = PaddingValues(start = 12.dp, top = topInset + 12.dp, end = 12.dp, bottom = 28.dp + bottomInset),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
@@ -500,41 +475,68 @@ internal class HomeRepository(
 ) {
     private val applicationContext = context.applicationContext
     private val imageLoader: ImageLoader = applicationContext.imageLoader
+    // 首屏内容不等待封面：预热在后台低优先级进行，可见封面请求优先获得带宽
+    private val coverWarmUpScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val preferences = applicationContext.getSharedPreferences(
         HOME_PREFERENCES,
         Context.MODE_PRIVATE,
     )
-    private var remoteImageHost: String? = null
-    internal var currentImageHost: String = ImageUrl.pickDefaultImageHost()
-        private set
+
+    /**
+     * 图片线路统一由 core 的线路表决定。
+     *
+     * 以前这里自己记一个 [currentImageHost]：一次 [load] 选定一台，之后无论那台是否变慢、
+     * 被墙、还是直接 403，整个会话都不会换——图片请求占全部流量的绝大多数，却是唯一没有
+     * 自动选路的一路。改为委托给 [dev.jmx.client.core.image.ImageHostRegistry] 后，
+     * 选路依据变成实际的成败与延迟，且与阅读器、下载器共用同一份健康度。
+     */
+    private val imageHosts = core.imageHostRegistry
+
+    init {
+        migrateLegacyPreferredImageHost()
+    }
+
+    /** 当前该用的图片线路（带 scheme，末尾无斜杠）。 */
+    internal val currentImageHost: String get() = imageHosts.current()
 
     internal fun availableImageHosts(): List<String> = buildList {
-        remoteImageHost?.let(::add)
+        addAll(imageHosts.all().map { "https://${it.host}" })
         addAll(JmxProtocolConstants.DefaultImageHosts)
     }.map { it.trimEnd('/') }.distinct()
 
-    internal fun preferredImageHost(): String? =
-        preferences.getString(PREFERRED_IMAGE_HOST_KEY, null)?.trimEnd('/')
+    internal fun preferredImageHost(): String? = imageHosts.manualHost()
 
     internal fun useImageHost(host: String?) {
-        preferences.edit {
-            if (host.isNullOrBlank()) remove(PREFERRED_IMAGE_HOST_KEY)
-            else putString(PREFERRED_IMAGE_HOST_KEY, host.trimEnd('/'))
-        }
-        currentImageHost = host?.trimEnd('/') ?: remoteImageHost ?: ImageUrl.pickDefaultImageHost()
+        imageHosts.useManualHost(host)
+        // 旧键已迁走，别让它在下次冷启动时又把手动选择"复活"。
+        preferences.edit { remove(PREFERRED_IMAGE_HOST_KEY) }
     }
 
-    suspend fun load(preloadCategoryId: String? = null): HomeUiState {
-        return try {
+    /**
+     * 把 v1 存在 `jmx_home` 里的手动线路搬到线路表里，只做一次。
+     * 不搬的话，升级后用户在设置里钉过的线路会静默失效（表现为"我选的线路没生效"）。
+     */
+    private fun migrateLegacyPreferredImageHost() {
+        val legacy = preferences.getString(PREFERRED_IMAGE_HOST_KEY, null)?.trimEnd('/')
+        if (legacy.isNullOrBlank()) return
+        if (imageHosts.manualHost() == null) imageHosts.useManualHost(legacy)
+        preferences.edit { remove(PREFERRED_IMAGE_HOST_KEY) }
+    }
+
+    /**
+     * 拉首屏。
+     *
+     * 整段放在 IO 线程上。这条链里最重的几步——读响应体、解密、Gson 解析、写磁盘缓存、
+     * 再把上百个条目映射成 [HomeAlbum]（含 `Html.fromHtml` 清洗栏目标题）——原先都跟着
+     * 调用方（Compose 的 LaunchedEffect）跑在主线程上，于是每次"转圈快转完时"整个界面卡一下。
+     */
+    suspend fun load(preloadCategoryId: String? = null): HomeUiState = withContext(Dispatchers.IO) {
+        try {
             val init = core.initializer.initialize()
-            remoteImageHost = (init.settingFetch as? InitStepResult.Success)
-                ?.value
-                ?.imageHost
-                ?.trimEnd('/')
-            val imageHost = preferredImageHost()
-                ?: remoteImageHost
-                ?: ImageUrl.pickDefaultImageHost()
-            currentImageHost = imageHost
+            imageHosts.rememberRemoteHost(
+                (init.settingFetch as? InitStepResult.Success)?.value?.imageHost,
+            )
+            val imageHost = currentImageHost
             when (val result = core.libraryApi.promotedSections()) {
                 is JmxResult.Success -> result.value.toHomeState(imageHost, preloadCategoryId)
                 is JmxResult.Failure -> HomeUiState.Error(result.error.toUiMessage())
@@ -546,15 +548,16 @@ internal class HomeRepository(
         }
     }
 
-    suspend fun loadMore(category: HomeCategory): HomeCategory {
-        return try {
+    /** 分类翻页，同 [load]：出网加映射整段留在 IO 线程，避免"刷新即将完成时卡一下"。 */
+    suspend fun loadMore(category: HomeCategory): HomeCategory = withContext(Dispatchers.IO) {
+        try {
             when (val result = core.libraryApi.promotedSectionPage(category.source, category.nextPage)) {
                 is JmxResult.Success -> {
                     val receivedAlbums = result.value.content
                         .filter { it.id.isNotBlank() }
                         .distinctBy { it.id }
                         .map { item -> item.toHomeAlbum(category.imageHost) }
-                    preloadCovers(receivedAlbums.take(LOAD_MORE_COVER_PRELOAD_COUNT))
+                    warmUpCovers(receivedAlbums.take(LOAD_MORE_COVER_PRELOAD_COUNT))
                     val mergedAlbums = (category.albums + receivedAlbums).distinctBy { it.id }
                     val total = result.value.total ?: category.total
                     category.copy(
@@ -611,10 +614,17 @@ internal class HomeRepository(
         }
 
         val preloadCategory = categories.firstOrNull { it.id == preloadCategoryId } ?: categories.first()
-        preloadCovers(preloadCategory.albums.take(INITIAL_COVER_PRELOAD_COUNT))
+        warmUpCovers(preloadCategory.albums.take(INITIAL_COVER_PRELOAD_COUNT))
         return HomeUiState.Content(
             categories = categories,
         )
+    }
+
+    private fun warmUpCovers(albums: List<HomeAlbum>) {
+        if (albums.isEmpty()) return
+        coverWarmUpScope.launch {
+            runCatching { preloadCovers(albums) }
+        }
     }
 
     private suspend fun preloadCovers(albums: List<HomeAlbum>) {
@@ -626,7 +636,7 @@ internal class HomeRepository(
                         semaphore.withPermit {
                             val request = ImageRequest.Builder(applicationContext)
                                 .data(album.coverUrl)
-                                .headers(albumCoverHeaders)
+                                .httpHeaders(albumCoverHeaders)
                                 .size(COVER_PRELOAD_WIDTH_PX, COVER_PRELOAD_HEIGHT_PX)
                                 .precision(Precision.INEXACT)
                                 .build()
@@ -684,7 +694,7 @@ internal fun AlbumSummary.toHomeAlbum(imageHost: String): HomeAlbum {
 internal fun buildCoverRequest(context: Context, url: String): ImageRequest {
     return ImageRequest.Builder(context)
         .data(url)
-        .headers(albumCoverHeaders)
+        .httpHeaders(albumCoverHeaders)
         .crossfade(false)
         .build()
 }
@@ -715,13 +725,14 @@ private fun HomePromoteSection.stableCategoryId(index: Int, resolvedTitle: Strin
         ?: "section:$index:$resolvedTitle"
 }
 
-private val albumCoverHeaders: Headers = Headers.Builder()
+private val albumCoverHeaders: NetworkHeaders = NetworkHeaders.Builder()
     .add("User-Agent", JmxProtocolConstants.MobileUserAgent)
     .add("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
     .add("Referer", "https://18comic.vip/")
     .build()
 
-private const val COVER_PRELOAD_CONCURRENCY = 6
+// 预热并发刻意低于可见封面请求可用的网络容量，让首屏可见项优先获得带宽
+private const val COVER_PRELOAD_CONCURRENCY = 4
 private const val INITIAL_COVER_PRELOAD_COUNT = 12
 private const val LOAD_MORE_COVER_PRELOAD_COUNT = 6
 private const val COVER_PRELOAD_TIMEOUT_MILLIS = 4_500L

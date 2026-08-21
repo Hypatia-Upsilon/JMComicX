@@ -2,7 +2,7 @@ package dev.jmx.client.core.protocol
 
 object JmxProtocolConstants {
 
-    const val DefaultApiVersion = "2.0.27"
+    const val DefaultApiVersion = "2.0.30"
     const val AppTokenSecret = "185Hcomic3PAPP7R"
     const val ChapterTokenSecret = "18comicAPPContent"
     const val DataSecret = "185Hcomic3PAPP7R"
@@ -13,10 +13,10 @@ object JmxProtocolConstants {
     const val Scramble421926 = 421926
 
     val DefaultApiHosts = listOf(
-        "https://www.cdnaspa.club",
-        "https://www.cdnaspa.vip",
-        "https://www.cdnplaystation6.cc",
-        "https://www.cdnplaystation6.vip"
+        "https://www.cdnhjk.net",
+        "https://www.cdngwc.cc",
+        "https://www.cdngwc.net",
+        "https://www.cdngwc.club"
     )
 
     val DefaultImageHosts = listOf(
