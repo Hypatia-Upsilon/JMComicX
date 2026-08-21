@@ -36,7 +36,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
 internal fun MiuixAboutBackdrop(
-    backdrop: LayerBackdrop,
+    backdrop: LayerBackdrop?,
     scrollProgress: () -> Float,
 ) {
     BgEffectBackground(
@@ -44,7 +44,7 @@ internal fun MiuixAboutBackdrop(
         isFullSize = true,
         isOs3Effect = true,
         modifier = Modifier.fillMaxSize(),
-        bgModifier = Modifier.layerBackdrop(backdrop),
+        bgModifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier,
         alpha = { 1f - scrollProgress() * 0.18f },
     ) {}
 }
@@ -52,7 +52,7 @@ internal fun MiuixAboutBackdrop(
 @Composable
 internal fun MiuixForegroundBlurHero(
     version: String,
-    backdrop: LayerBackdrop,
+    backdrop: LayerBackdrop?,
     scrollProgress: () -> Float,
     modifier: Modifier = Modifier,
 ) {
@@ -105,12 +105,18 @@ internal fun MiuixForegroundBlurHero(
             color = MiuixTheme.colorScheme.onBackground,
             modifier = Modifier
                 .fillMaxWidth()
-                .textureBlur(
-                    backdrop = backdrop,
-                    shape = RoundedCornerShape(16.dp),
-                    blurRadius = 150f,
-                    colors = titleBlurColors,
-                    contentBlendMode = BlendMode.DstIn,
+                .then(
+                    if (backdrop != null) {
+                        Modifier.textureBlur(
+                            backdrop = backdrop,
+                            shape = RoundedCornerShape(16.dp),
+                            blurRadius = 150f,
+                            colors = titleBlurColors,
+                            contentBlendMode = BlendMode.DstIn,
+                        )
+                    } else {
+                        Modifier
+                    },
                 ),
         )
         Text(

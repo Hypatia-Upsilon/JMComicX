@@ -13,11 +13,19 @@ internal enum class BookshelfSortOrder(val label: String) {
     RECENTLY_READ("最近阅读"),
 }
 
+internal enum class BookshelfAuthorMatchSource(val label: String) {
+    FAVORITES("仅我的收藏"),
+    ALL_WORKS("所有作品"),
+}
+
 internal data class BookshelfGroup(
     val id: String,
     val name: String,
     val matchFavoritesByTags: Boolean,
     val tagRules: List<String>,
+    val matchByAuthors: Boolean = false,
+    val authorRules: List<String> = emptyList(),
+    val authorMatchSource: BookshelfAuthorMatchSource = BookshelfAuthorMatchSource.FAVORITES,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -54,6 +62,20 @@ internal data class BookshelfEntry(
         return "$chapter · $pageText"
     }
 }
+
+/** 导入/导出用的书架快照：只有内容，不含排序偏好这类本机设置。 */
+internal data class BookshelfSnapshot(
+    val entries: List<BookshelfEntry>,
+    val groups: List<BookshelfGroup>,
+)
+
+internal data class BookshelfImportOutcome(
+    val addedEntries: Int,
+    val mergedEntries: Int,
+    val addedGroups: Int,
+    val reusedGroups: Int,
+    val droppedEntries: Int,
+)
 
 internal class BookshelfRepository(
     context: Context,
@@ -133,6 +155,9 @@ internal class BookshelfRepository(
         name: String,
         matchFavoritesByTags: Boolean,
         tagRules: List<String>,
+        matchByAuthors: Boolean = false,
+        authorRules: List<String> = emptyList(),
+        authorMatchSource: BookshelfAuthorMatchSource = BookshelfAuthorMatchSource.FAVORITES,
     ): BookshelfGroup? = synchronized(lock) {
         val normalizedName = name.trim().takeIf(String::isNotEmpty) ?: return@synchronized null
         val current = readGroups()
@@ -142,12 +167,17 @@ internal class BookshelfRepository(
         ) {
             return@synchronized null
         }
+        val normalizedTags = tagRules.mapNotNull(::normalizeSearchTag).distinct()
+        val normalizedAuthors = authorRules.mapNotNull(::normalizeSearchTag).distinct()
         val timestamp = now()
         val group = BookshelfGroup(
             id = "group-${UUID.randomUUID()}",
             name = normalizedName,
-            matchFavoritesByTags = matchFavoritesByTags,
-            tagRules = tagRules.mapNotNull(::normalizeSearchTag).distinct(),
+            matchFavoritesByTags = matchFavoritesByTags && normalizedTags.isNotEmpty(),
+            tagRules = normalizedTags,
+            matchByAuthors = matchByAuthors && normalizedAuthors.isNotEmpty(),
+            authorRules = normalizedAuthors,
+            authorMatchSource = authorMatchSource,
             createdAt = timestamp,
             updatedAt = timestamp,
         )
@@ -160,12 +190,17 @@ internal class BookshelfRepository(
         name: String,
         matchFavoritesByTags: Boolean,
         tagRules: List<String>,
+        matchByAuthors: Boolean = false,
+        authorRules: List<String> = emptyList(),
+        authorMatchSource: BookshelfAuthorMatchSource = BookshelfAuthorMatchSource.FAVORITES,
     ): BookshelfGroup? = synchronized(lock) {
         val normalizedName = name.trim().takeIf(String::isNotEmpty) ?: return@synchronized null
         val current = readGroups()
         if (current.any { it.id != groupId && it.name.equals(normalizedName, ignoreCase = true) }) {
             return@synchronized null
         }
+        val normalizedTags = tagRules.mapNotNull(::normalizeSearchTag).distinct()
+        val normalizedAuthors = authorRules.mapNotNull(::normalizeSearchTag).distinct()
         var updatedGroup: BookshelfGroup? = null
         val updated = current.map { group ->
             if (group.id != groupId) {
@@ -173,8 +208,11 @@ internal class BookshelfRepository(
             } else {
                 group.copy(
                     name = normalizedName,
-                    matchFavoritesByTags = matchFavoritesByTags,
-                    tagRules = tagRules.mapNotNull(::normalizeSearchTag).distinct(),
+                    matchFavoritesByTags = matchFavoritesByTags && normalizedTags.isNotEmpty(),
+                    tagRules = normalizedTags,
+                    matchByAuthors = matchByAuthors && normalizedAuthors.isNotEmpty(),
+                    authorRules = normalizedAuthors,
+                    authorMatchSource = authorMatchSource,
                     updatedAt = now(),
                 ).also { updatedGroup = it }
             }
@@ -229,16 +267,51 @@ internal class BookshelfRepository(
         preferences.edit { putString(BOOKSHELF_SORT_KEY, order.name) }
     }
 
+    /**
+     * 取一份可导出的书架快照。
+     *
+     * [groupIds] 传 null 表示"全部"，此时 [includeGroups] 决定要不要带上分组定义；
+     * 按分组导出时分组定义一定会带上——不带的话对方收到的是一堆无处安放的漫画。
+     *
+     * 条目里的 groupIds 会被裁到真正导出的分组集合上：留着悬空的分组 id，
+     * 对方导入后就会出现"漫画属于一个看不见的分组"。
+     */
+    fun snapshot(
+        groupIds: Set<String>? = null,
+        includeGroups: Boolean = true,
+    ): BookshelfSnapshot = synchronized(lock) {
+        bookshelfSnapshotOf(
+            entries = readEntries(),
+            groups = readGroups().sortedBy(BookshelfGroup::createdAt),
+            groupIds = groupIds,
+            includeGroups = includeGroups,
+        )
+    }
+
+    /** 整体替换：本地书架与分组全部作废，只留导入内容。 */
+    fun replaceWith(snapshot: BookshelfSnapshot): BookshelfImportOutcome = synchronized(lock) {
+        val (next, outcome) = replaceBookshelfWith(snapshot)
+        writeGroups(next.groups)
+        writeEntries(next.entries)
+        outcome
+    }
+
+    /** 合并导入：只做加法，细则见 [mergeBookshelfWith]。 */
+    fun mergeFrom(snapshot: BookshelfSnapshot): BookshelfImportOutcome = synchronized(lock) {
+        val (next, outcome) = mergeBookshelfWith(
+            entries = readEntries(),
+            groups = readGroups(),
+            snapshot = snapshot,
+            mergedAt = now(),
+        )
+        if (outcome.addedGroups > 0) writeGroups(next.groups)
+        if (outcome.addedEntries > 0 || outcome.mergedEntries > 0) writeEntries(next.entries)
+        outcome
+    }
+
     private fun readEntries(): List<BookshelfEntry> {
         val encoded = preferences.getString(BOOKSHELF_ENTRIES_KEY, null) ?: return emptyList()
-        return runCatching {
-            val array = JSONArray(encoded)
-            buildList {
-                repeat(array.length()) { index ->
-                    array.optJSONObject(index)?.toBookshelfEntryOrNull()?.let(::add)
-                }
-            }.distinctBy(BookshelfEntry::albumId)
-        }.getOrDefault(emptyList())
+        return runCatching { JSONArray(encoded).toBookshelfEntries() }.getOrDefault(emptyList())
     }
 
     private fun writeEntries(entries: List<BookshelfEntry>) {
@@ -249,14 +322,7 @@ internal class BookshelfRepository(
 
     private fun readGroups(): List<BookshelfGroup> {
         val encoded = preferences.getString(BOOKSHELF_GROUPS_KEY, null) ?: return emptyList()
-        return runCatching {
-            val array = JSONArray(encoded)
-            buildList {
-                repeat(array.length()) { index ->
-                    array.optJSONObject(index)?.toBookshelfGroupOrNull()?.let(::add)
-                }
-            }.distinctBy(BookshelfGroup::id)
-        }.getOrDefault(emptyList())
+        return runCatching { JSONArray(encoded).toBookshelfGroups() }.getOrDefault(emptyList())
     }
 
     private fun writeGroups(groups: List<BookshelfGroup>) {
@@ -363,7 +429,11 @@ internal fun assignBookshelfGroups(
     return updated to changed
 }
 
-internal fun parseBookshelfTagRules(value: String): List<String> = value
+internal fun parseBookshelfTagRules(value: String): List<String> = parseBookshelfRules(value)
+
+internal fun parseBookshelfAuthorRules(value: String): List<String> = parseBookshelfRules(value)
+
+private fun parseBookshelfRules(value: String): List<String> = value
     .split(BOOKSHELF_TAG_RULE_DELIMITERS)
     .mapNotNull(::normalizeSearchTag)
     .distinct()
@@ -374,6 +444,13 @@ internal fun matchesBookshelfTagRules(albumTags: List<String>, rules: List<Strin
     return rules.mapNotNull(::normalizeSearchTag).all { target ->
         available.any { tag -> tag == target || tag.contains(target) || target.contains(tag) }
     }
+}
+
+/** 作者规则要求全部命中，兼容服务端将多位作者合并到同一字段的返回形式。 */
+internal fun matchesBookshelfAuthorRules(author: String, rules: List<String>): Boolean {
+    if (rules.isEmpty()) return false
+    val available = normalizeSearchTag(author) ?: return false
+    return rules.mapNotNull(::normalizeSearchTag).all { target -> available.contains(target) }
 }
 
 internal fun HomeAlbum.matchesBookshelfPickerQuery(query: String): Boolean {
@@ -408,6 +485,9 @@ private fun BookshelfGroup.toJson(): JSONObject = JSONObject().apply {
     put("name", name)
     put("match_favorites_by_tags", matchFavoritesByTags)
     put("tag_rules", JSONArray(tagRules))
+    put("match_by_authors", matchByAuthors)
+    put("author_rules", JSONArray(authorRules))
+    put("author_match_source", authorMatchSource.name)
     put("created_at", createdAt)
     put("updated_at", updatedAt)
 }
@@ -441,6 +521,11 @@ private fun JSONObject.toBookshelfGroupOrNull(): BookshelfGroup? {
         name = name,
         matchFavoritesByTags = optBoolean("match_favorites_by_tags", false),
         tagRules = optStringList("tag_rules").mapNotNull(::normalizeSearchTag).distinct(),
+        matchByAuthors = optBoolean("match_by_authors", false),
+        authorRules = optStringList("author_rules").mapNotNull(::normalizeSearchTag).distinct(),
+        authorMatchSource = BookshelfAuthorMatchSource.entries.firstOrNull {
+            it.name == optString("author_match_source")
+        } ?: BookshelfAuthorMatchSource.FAVORITES,
         createdAt = createdAt,
         updatedAt = optLong("updated_at", createdAt),
     )
@@ -461,6 +546,169 @@ private fun JSONObject.optNullableLong(name: String): Long? =
 private fun JSONObject.optNullableInt(name: String): Int? =
     if (has(name) && !isNull(name)) optInt(name) else null
 
+private fun JSONArray.toBookshelfEntries(): List<BookshelfEntry> {
+    val parsed = mutableListOf<BookshelfEntry>()
+    repeat(length()) { index -> optJSONObject(index)?.toBookshelfEntryOrNull()?.let(parsed::add) }
+    return parsed.distinctBy(BookshelfEntry::albumId)
+}
+
+private fun JSONArray.toBookshelfGroups(): List<BookshelfGroup> {
+    val parsed = mutableListOf<BookshelfGroup>()
+    repeat(length()) { index -> optJSONObject(index)?.toBookshelfGroupOrNull()?.let(parsed::add) }
+    return parsed.distinctBy(BookshelfGroup::id)
+}
+
+/**
+ * 导出范围裁剪。
+ *
+ * [groupIds] 为 null 表示"全部"，此时 [includeGroups] 决定要不要带上分组定义；
+ * 按分组导出时分组定义一定会带上，否则对方拿到的漫画会挂在看不见的分组 id 上。
+ * 条目里的 groupIds 也会裁到真正导出的分组集合上，避免留下悬空的分组 id。
+ */
+internal fun bookshelfSnapshotOf(
+    entries: List<BookshelfEntry>,
+    groups: List<BookshelfGroup>,
+    groupIds: Set<String>?,
+    includeGroups: Boolean,
+): BookshelfSnapshot {
+    val kept = when {
+        groupIds != null -> groups.filter { it.id in groupIds }
+        includeGroups -> groups
+        else -> emptyList()
+    }
+    val keptIds = kept.mapTo(mutableSetOf(), BookshelfGroup::id)
+    return BookshelfSnapshot(
+        entries = entries
+            .filter { groupIds == null || it.groupIds.any { id -> id in keptIds } }
+            .map { it.copy(groupIds = it.groupIds.intersect(keptIds)) },
+        groups = kept,
+    )
+}
+
+/** 整体替换后的书架内容与统计；超出上限的部分计入 droppedEntries。 */
+internal fun replaceBookshelfWith(
+    snapshot: BookshelfSnapshot,
+): Pair<BookshelfSnapshot, BookshelfImportOutcome> {
+    val groups = snapshot.groups.distinctBy(BookshelfGroup::id).take(MAX_BOOKSHELF_GROUPS)
+    val validGroupIds = groups.mapTo(mutableSetOf(), BookshelfGroup::id)
+    val incoming = snapshot.entries.distinctBy(BookshelfEntry::albumId)
+    val entries = incoming
+        .map { it.copy(groupIds = it.groupIds.intersect(validGroupIds)) }
+        .take(MAX_BOOKSHELF_ENTRIES)
+    return BookshelfSnapshot(entries = entries, groups = groups) to BookshelfImportOutcome(
+        addedEntries = entries.size,
+        mergedEntries = 0,
+        addedGroups = groups.size,
+        reusedGroups = 0,
+        droppedEntries = incoming.size - entries.size,
+    )
+}
+
+/**
+ * 合并导入：只做加法。
+ *
+ * 分组按**名称**归并而不是按 id：分组 id 是随机 UUID，照搬会让书架上出现两个同名分组。
+ * 已有漫画只补分组归属，本地阅读进度一律不动——别人读到哪与我无关；
+ * 新漫画保留文件里带的进度，于是"导出自己的书架再导回来"是无损的。
+ */
+internal fun mergeBookshelfWith(
+    entries: List<BookshelfEntry>,
+    groups: List<BookshelfGroup>,
+    snapshot: BookshelfSnapshot,
+    mergedAt: Long,
+    freshGroupId: () -> String = { "group-${UUID.randomUUID()}" },
+): Pair<BookshelfSnapshot, BookshelfImportOutcome> {
+    val remappedGroupIds = mutableMapOf<String, String>()
+    val newGroups = mutableListOf<BookshelfGroup>()
+    var reusedGroups = 0
+    snapshot.groups.distinctBy(BookshelfGroup::id).forEach { group ->
+        val matched = (groups + newGroups).firstOrNull { it.name.equals(group.name, ignoreCase = true) }
+        if (matched != null) {
+            remappedGroupIds[group.id] = matched.id
+            reusedGroups++
+            return@forEach
+        }
+        if (groups.size + newGroups.size >= MAX_BOOKSHELF_GROUPS) return@forEach
+        // id 撞车只会发生在"导出自己的书架再导回来"，换个新 id 即可，名称归并已经兜住了重复。
+        val id = if (groups.any { it.id == group.id }) freshGroupId() else group.id
+        remappedGroupIds[group.id] = id
+        newGroups += group.copy(id = id)
+    }
+
+    var current = entries
+    var addedEntries = 0
+    var mergedEntries = 0
+    var droppedEntries = 0
+    snapshot.entries.distinctBy(BookshelfEntry::albumId).forEach { incoming ->
+        val groupIds = incoming.groupIds.mapNotNullTo(mutableSetOf()) { remappedGroupIds[it] }
+        val existing = current.firstOrNull { it.albumId == incoming.albumId }
+        when {
+            existing == null && current.size >= MAX_BOOKSHELF_ENTRIES -> droppedEntries++
+            existing == null -> {
+                current = listOf(incoming.copy(groupIds = groupIds)) + current
+                addedEntries++
+            }
+            !existing.groupIds.containsAll(groupIds) -> {
+                current = current.map { entry ->
+                    if (entry.albumId != incoming.albumId) {
+                        entry
+                    } else {
+                        entry.copy(groupIds = entry.groupIds + groupIds, updatedAt = mergedAt)
+                    }
+                }
+                mergedEntries++
+            }
+        }
+    }
+    return BookshelfSnapshot(entries = current, groups = groups + newGroups) to BookshelfImportOutcome(
+        addedEntries = addedEntries,
+        mergedEntries = mergedEntries,
+        addedGroups = newGroups.size,
+        reusedGroups = reusedGroups,
+        droppedEntries = droppedEntries,
+    )
+}
+
+/**
+ * 导出文件的固定格式。
+ *
+ * 外层信封只加校验和统计字段，`entries` / `groups` 与本地存储用的是同一套编码，
+ * 所以格式天然可逆：导出的文件导回来能完整还原书架。
+ */
+internal fun encodeBookshelfSnapshot(snapshot: BookshelfSnapshot, exportedAt: Long): String {
+    val entries = JSONArray()
+    snapshot.entries.take(MAX_BOOKSHELF_ENTRIES).forEach { entries.put(it.toJson()) }
+    val groups = JSONArray()
+    snapshot.groups.take(MAX_BOOKSHELF_GROUPS).forEach { groups.put(it.toJson()) }
+    return JSONObject().apply {
+        put("format", BOOKSHELF_TRANSFER_FORMAT)
+        put("version", BOOKSHELF_TRANSFER_VERSION)
+        put("app", "JMComicX")
+        put("exported_at", exportedAt)
+        put("entry_count", entries.length())
+        put("group_count", groups.length())
+        put("groups", groups)
+        put("entries", entries)
+    }.toString(2)
+}
+
+/**
+ * 解析导出文件。
+ *
+ * 只认 `format` 字段，不卡 `version`：字段都是可选读取的，未来加字段的新版文件在老版本上
+ * 也能读出它认识的那部分，而不是直接告诉用户"文件不支持"。
+ */
+internal fun decodeBookshelfSnapshot(text: String): BookshelfSnapshot? {
+    val root = runCatching { JSONObject(text) }.getOrNull() ?: return null
+    if (root.optString("format") != BOOKSHELF_TRANSFER_FORMAT) return null
+    return BookshelfSnapshot(
+        entries = root.optJSONArray("entries")?.toBookshelfEntries() ?: emptyList(),
+        groups = root.optJSONArray("groups")?.toBookshelfGroups() ?: emptyList(),
+    )
+}
+
+internal const val BOOKSHELF_TRANSFER_FORMAT = "jmcomicx-bookshelf"
+internal const val BOOKSHELF_TRANSFER_VERSION = 1
 internal const val ALL_BOOKSHELF_GROUP_ID = "all"
 private const val BOOKSHELF_PREFERENCES = "jmx_bookshelf"
 private const val BOOKSHELF_ENTRIES_KEY = "entries"

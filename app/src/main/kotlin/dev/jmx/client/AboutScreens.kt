@@ -38,12 +38,12 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurBlendMode
 import top.yukonga.miuix.kmp.blur.BlurDefaults
-import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import dev.jmx.client.effect.rememberBarBackdrop
 
 internal data class ThirdPartyLibrary(
     val name: String,
@@ -53,6 +53,7 @@ internal data class ThirdPartyLibrary(
 
 internal val thirdPartyLibraries = listOf(
     ThirdPartyLibrary("Compose Miuix", "Apache-2.0", "https://github.com/compose-miuix-ui/miuix"),
+    ThirdPartyLibrary("AndroidLiquidGlass", "Apache-2.0", "https://github.com/Kyant0/AndroidLiquidGlass"),
     ThirdPartyLibrary("JMComic-Crawler-Python", "MIT", "https://github.com/hect0x7/JMComic-Crawler-Python"),
     ThirdPartyLibrary("AndroidX / Jetpack Compose", "Apache-2.0", "https://source.android.com/docs/setup/about/licenses"),
     ThirdPartyLibrary("Kotlin", "Apache-2.0", "https://github.com/JetBrains/kotlin"),
@@ -109,7 +110,7 @@ internal fun AboutScreen(
             }
         }
     }
-    val backdrop = rememberLayerBackdrop()
+    val backdrop = rememberBarBackdrop()
     val blurColors = BlurDefaults.blurColors(
         blendColors = listOf(
             BlendColorEntry(
@@ -179,11 +180,17 @@ internal fun AboutScreen(
                     Card(
                         modifier = Modifier
                             .padding(horizontal = 12.dp)
-                            .textureBlur(
-                                backdrop = backdrop,
-                                shape = RoundedCornerShape(16.dp),
-                                blurRadius = 52f,
-                                colors = blurColors,
+                            .then(
+                                if (backdrop != null) {
+                                    Modifier.textureBlur(
+                                        backdrop = backdrop,
+                                        shape = RoundedCornerShape(16.dp),
+                                        blurRadius = 52f,
+                                        colors = blurColors,
+                                    )
+                                } else {
+                                    Modifier
+                                },
                             ),
                         colors = CardDefaults.defaultColors(
                             color = Color.Transparent,
@@ -201,11 +208,17 @@ internal fun AboutScreen(
                     Card(
                         modifier = Modifier
                             .padding(horizontal = 12.dp, vertical = 12.dp)
-                            .textureBlur(
-                                backdrop = backdrop,
-                                shape = RoundedCornerShape(16.dp),
-                                blurRadius = 52f,
-                                colors = blurColors,
+                            .then(
+                                if (backdrop != null) {
+                                    Modifier.textureBlur(
+                                        backdrop = backdrop,
+                                        shape = RoundedCornerShape(16.dp),
+                                        blurRadius = 52f,
+                                        colors = blurColors,
+                                    )
+                                } else {
+                                    Modifier
+                                },
                             ),
                         colors = CardDefaults.defaultColors(
                             color = Color.Transparent,

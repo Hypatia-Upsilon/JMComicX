@@ -2,13 +2,14 @@ package dev.jmx.client
 
 import android.content.Context
 import androidx.core.content.edit
-import coil.annotation.ExperimentalCoilApi
-import coil.imageLoader
+import coil3.imageLoader
 import dev.jmx.client.core.network.ApiEndpointSelection
 import dev.jmx.client.core.network.defaultOkHttpClient
 import dev.jmx.client.core.network.normalizedBaseUrlOrNull
 import dev.jmx.client.core.result.JmxResult
 import dev.jmx.client.core.runtime.JmxCore
+import dev.jmx.client.effect.FloatingNavBarStyle
+import dev.jmx.client.effect.TopBarBlurStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -52,6 +53,55 @@ internal class AppSettingsRepository(
 
     fun autoCheckInEnabled(): Boolean = preferences.getBoolean(AUTO_CHECK_IN_KEY, true)
 
+    /** 内容语言："CN"=简体（默认，不附加 lang 参数），"TW"=繁体（服务端返回繁体文本） */
+    fun contentLanguage(): String {
+        val value = preferences.getString(CONTENT_LANGUAGE_KEY, null)
+        return if (value == CONTENT_LANGUAGE_TRADITIONAL) CONTENT_LANGUAGE_TRADITIONAL else CONTENT_LANGUAGE_SIMPLIFIED
+    }
+
+    fun setContentLanguage(language: String) {
+        val normalized = if (language == CONTENT_LANGUAGE_TRADITIONAL) {
+            CONTENT_LANGUAGE_TRADITIONAL
+        } else {
+            CONTENT_LANGUAGE_SIMPLIFIED
+        }
+        preferences.edit { putString(CONTENT_LANGUAGE_KEY, normalized) }
+    }
+
+    /** 顶栏模糊样式：GAUSSIAN（默认）或 PROGRESSIVE */
+    fun topBarBlurStyle(): TopBarBlurStyle = TopBarBlurStyle.fromName(
+        preferences.getString(TOP_BAR_BLUR_STYLE_KEY, null)
+    )
+
+    fun setTopBarBlurStyle(style: TopBarBlurStyle) {
+        preferences.edit { putString(TOP_BAR_BLUR_STYLE_KEY, style.name) }
+    }
+
+    /** 底栏悬浮样式开关，默认关闭（关闭时使用普通贴底导航栏） */
+    fun liquidGlassNavBarEnabled(): Boolean = preferences.getBoolean(LIQUID_GLASS_NAV_BAR_KEY, false)
+
+    fun setLiquidGlassNavBarEnabled(enabled: Boolean) {
+        preferences.edit { putBoolean(LIQUID_GLASS_NAV_BAR_KEY, enabled) }
+    }
+
+    /** 悬浮底栏样式：DEFAULT（官方磨砂，默认）或 IOS_LIKE（iOS 液态玻璃） */
+    fun floatingNavBarStyle(): FloatingNavBarStyle = FloatingNavBarStyle.fromName(
+        preferences.getString(FLOATING_NAV_BAR_STYLE_KEY, null)
+    )
+
+    fun setFloatingNavBarStyle(style: FloatingNavBarStyle) {
+        preferences.edit { putString(FLOATING_NAV_BAR_STYLE_KEY, style.name) }
+    }
+
+    /** 收藏页排序方式，默认按收藏时间（与服务端默认一致） */
+    fun favoriteSortOrder(): FavoriteSortOrder = FavoriteSortOrder.fromName(
+        preferences.getString(FAVORITE_SORT_ORDER_KEY, null)
+    )
+
+    fun setFavoriteSortOrder(order: FavoriteSortOrder) {
+        preferences.edit { putString(FAVORITE_SORT_ORDER_KEY, order.name) }
+    }
+
     fun setAutoCheckInEnabled(enabled: Boolean) {
         preferences.edit { putBoolean(AUTO_CHECK_IN_KEY, enabled) }
     }
@@ -64,13 +114,11 @@ internal class AppSettingsRepository(
         preferences.edit { putString(AUTO_CHECK_IN_DATE_KEY, todayDate()) }
     }
 
-    @OptIn(ExperimentalCoilApi::class)
     suspend fun clearImageCache() = withContext(Dispatchers.IO) {
         applicationContext.imageLoader.memoryCache?.clear()
         applicationContext.imageLoader.diskCache?.clear()
     }
 
-    @OptIn(ExperimentalCoilApi::class)
     suspend fun imageCacheSizeBytes(): Long = withContext(Dispatchers.IO) {
         applicationContext.imageLoader.diskCache?.size ?: 0L
     }
@@ -148,8 +196,15 @@ internal class AppSettingsRepository(
     }
 }
 
-private const val SETTINGS_PREFERENCES = "jmx_settings"
+internal const val SETTINGS_PREFERENCES = "jmx_settings"
+internal const val CONTENT_LANGUAGE_KEY = "content_language"
+internal const val CONTENT_LANGUAGE_SIMPLIFIED = "CN"
+internal const val CONTENT_LANGUAGE_TRADITIONAL = "TW"
 private const val AUTO_CHECK_IN_KEY = "auto_check_in"
 private const val AUTO_CHECK_IN_DATE_KEY = "auto_check_in_date"
 private const val API_SELECTION_CONFIGURED_KEY = "api_selection_configured"
+private const val TOP_BAR_BLUR_STYLE_KEY = "top_bar_blur_style"
+private const val LIQUID_GLASS_NAV_BAR_KEY = "liquid_glass_nav_bar"
+private const val FLOATING_NAV_BAR_STYLE_KEY = "floating_nav_bar_style"
+private const val FAVORITE_SORT_ORDER_KEY = "favorite_sort_order"
 private const val IMAGE_PROBE_TIMEOUT_SECONDS = 5L
