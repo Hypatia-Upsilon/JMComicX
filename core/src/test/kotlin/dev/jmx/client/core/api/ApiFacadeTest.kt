@@ -2,7 +2,10 @@ package dev.jmx.client.core.api
 
 import dev.jmx.client.core.crypto.AesEcbPkcs7
 import dev.jmx.client.core.crypto.JmxHash
+import dev.jmx.client.core.cache.InMemoryKeyValueStore
+import dev.jmx.client.core.cache.ProtocolStateStore
 import dev.jmx.client.core.network.ApiEndpointManager
+import dev.jmx.client.core.network.ApiEndpointSelection
 import dev.jmx.client.core.network.DefaultRetryPolicy
 import dev.jmx.client.core.network.JmxApiClient
 import dev.jmx.client.core.network.JmxHttpClient
@@ -183,6 +186,56 @@ class ApiFacadeTest {
         userApi.logout()
 
         assertEquals(0, session.cookies().size)
+    }
+
+    /**
+     * 登录必须记住是哪台机器签发的会话。
+     *
+     * 服务端把 AVS 绑在签发它的域名上（同一个 AVS 换到镜像域名请求 /favorite 回 401），
+     * 所以选路要跟着会话走；但这不是用户的选择，不该冒充"手动线路"。
+     */
+    @Test
+    fun userApiRemembersLoginHostAsSessionEndpoint() {
+        val stateStore = ProtocolStateStore(InMemoryKeyValueStore())
+        stateStore.updateApiHosts(listOf(server.url("/").toString()))
+        val endpointManager = ApiEndpointManager(protocolStateStore = stateStore)
+        val store = InMemoryCookieStore()
+        val session = SessionManager(store)
+        server.enqueue(encryptedResponse("""{"s":"avs-value","uid":1,"username":"alice"}"""))
+        val userApi = UserApi(
+            apiClient = createClient(endpointManager = endpointManager, cookieStore = store),
+            sessionManager = session,
+            endpointManager = endpointManager
+        )
+
+        val result = kotlinx.coroutines.runBlocking { userApi.login("user", "pass") }
+
+        assertTrue(result is JmxResult.Success)
+        assertEquals(server.url("/").toString(), endpointManager.sessionEndpoint()?.toString())
+        assertEquals(server.url("/").toString(), stateStore.sessionApiHost())
+        assertTrue(endpointManager.selection() is ApiEndpointSelection.Auto)
+        assertEquals(null, stateStore.manualApiHost())
+    }
+
+    /** 退出登录只解开会话亲和；用户自己选的线路是设置项，不该被顺手清掉。 */
+    @Test
+    fun userApiLogoutClearsSessionEndpointButKeepsManualEndpoint() {
+        val stateStore = ProtocolStateStore(InMemoryKeyValueStore())
+        val endpointManager = ApiEndpointManager(protocolStateStore = stateStore)
+        endpointManager.useSessionEndpoint("session.test")
+        endpointManager.useManualEndpoint("manual.test")
+        val session = SessionManager(InMemoryCookieStore())
+        val userApi = UserApi(
+            apiClient = createClient(endpointManager = endpointManager),
+            sessionManager = session,
+            endpointManager = endpointManager
+        )
+
+        userApi.logout()
+
+        assertEquals(null, endpointManager.sessionEndpoint())
+        assertEquals(null, stateStore.sessionApiHost())
+        assertEquals("https://manual.test/", stateStore.manualApiHost())
     }
 
     @Test

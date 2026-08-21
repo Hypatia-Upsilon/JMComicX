@@ -4,9 +4,7 @@ import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
-import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 interface ByteCipher {
@@ -51,18 +49,6 @@ class AesGcmByteCipher(
                 "AES key must be 16/24/32 bytes"
             }
             return keyBytes
-        }
-
-        fun deriveFromPassphrase(
-            passphrase: CharArray,
-            salt: ByteArray,
-            iterations: Int = 120_000,
-            keyLengthBytes: Int = 32
-        ): AesGcmByteCipher {
-            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            val spec = PBEKeySpec(passphrase, salt, iterations, keyLengthBytes * 8)
-            val key = factory.generateSecret(spec).encoded
-            return AesGcmByteCipher(key)
         }
 
         fun randomKey(sizeBytes: Int = 32): ByteArray =

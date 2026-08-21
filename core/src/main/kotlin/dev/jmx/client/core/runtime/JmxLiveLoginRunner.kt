@@ -80,7 +80,7 @@ data class JmxLiveLoginReport(
     val avsCheck: JmxLiveLoginStep<Boolean>,
     val favorite: JmxLiveLoginStep<AlbumPage>,
     val watchList: JmxLiveLoginStep<AlbumPage>,
-    val daily: JmxLiveLoginStep<DailyCheckInfo>,
+    val daily: JmxLiveLoginStep<DailyCheckInfo?>,
     val acceptance: JmxLiveLoginAcceptance,
     val issues: List<JmxDiagnosticIssue>,
     val health: JmxCoreHealth

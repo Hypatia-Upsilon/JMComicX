@@ -17,8 +17,7 @@ class UserApi(
 
     private val sessionSyncHosts: () -> List<String> = { emptyList() },
 
-    private val endpointManager: ApiEndpointManager? = null,
-    private val pinEndpointOnLogin: Boolean = true
+    private val endpointManager: ApiEndpointManager? = null
 ) {
     suspend fun login(username: String, password: String): JmxResult<LoginSession> {
         if (username.isBlank() || password.isBlank()) {
@@ -68,7 +67,11 @@ class UserApi(
                 is JmxResult.Failure -> return replicated
             }
         }
-        if (pinEndpointOnLogin && endpointManager != null) {
+        // 记住是哪台机器签发的这个会话。
+        // 服务端把 AVS 绑定在签发它的域名上：同一个 AVS 换到别的域名请求 /favorite，
+        // 回的是 401「請先登入會員」（已实测四台镜像全部如此）。上面的 AVS 同步
+        // 只保证 cookie 送得出去，送到别处照样不认——所以选路必须跟着会话走。
+        endpointManager?.let { manager ->
             val loginBase = response.exchange.requestUrl.toHttpUrlOrNull()
                 ?.newBuilder()
                 ?.encodedPath("/")
@@ -77,7 +80,7 @@ class UserApi(
                 ?.build()
                 ?.toString()
             if (!loginBase.isNullOrBlank()) {
-                endpointManager.useManualEndpoint(loginBase)
+                manager.useSessionEndpoint(loginBase)
             }
         }
         return JmxResult.Success(
@@ -91,6 +94,7 @@ class UserApi(
 
     fun logout() {
         sessionManager.clear()
-        endpointManager?.useAutoSelection()
+        // 只解开会话亲和，不动用户自己选的线路——那是设置项，不该被退出登录顺手清掉。
+        endpointManager?.clearSessionEndpoint()
     }
 }

@@ -15,6 +15,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+private const val TEST_HOSTS_GENERATION = "2026-08"
+
 class JmxLiveConnectivityRunnerTest {
     private lateinit var server: MockWebServer
 
@@ -62,7 +64,10 @@ class JmxLiveConnectivityRunnerTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to server.url("/").toString())
+                    mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )
                 ),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),
@@ -118,7 +123,10 @@ class JmxLiveConnectivityRunnerTest {
         val core = JmxCore.create(
             JmxCoreConfig(
                 keyValueStore = InMemoryKeyValueStore(
-                    mapOf("protocol.api.hosts" to server.url("/").toString())
+                    mapOf(
+                        "protocol.api.hosts" to server.url("/").toString(),
+                        "protocol.api.hosts.generation" to TEST_HOSTS_GENERATION,
+                    )
                 ),
                 apiClock = fixedClock(ts),
                 retryPolicy = DefaultRetryPolicy(maxAttempts = 1),

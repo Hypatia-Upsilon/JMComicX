@@ -210,10 +210,13 @@ private fun JmxCoreInitResult.toDiagnosticIssues(): List<JmxDiagnosticIssue> {
     return buildList {
         when (val domain = domainRefresh) {
             is InitStepResult.Success -> Unit
+            // 热启动把域名刷新挪到了后台，此刻没有结果不是问题。
+            InitStepResult.Deferred -> Unit
             is InitStepResult.Failure -> add(domain.error.toIssue("initialize.domain_refresh"))
         }
         when (val setting = settingFetch) {
             is InitStepResult.Success -> Unit
+            InitStepResult.Deferred -> Unit
             is InitStepResult.Failure -> add(setting.error.toIssue("initialize.setting"))
         }
     }

@@ -56,8 +56,10 @@ class ApiEndpointProberTest {
         assertEquals(1, endpoints[0].consecutiveFailureCount)
         assertEquals(1, endpoints[1].successCount)
         assertTrue(endpoints[1].lastLatencyMillis != null)
-        assertEquals("/setting", failingServer.takeRequest().path)
-        assertEquals("/setting", healthyServer.takeRequest().path)
+        // 探测走的是与真实请求同一份 buildApiUrl，因此 /setting 会带上破缓存的 t 参数，
+        // 这里只关心打的是哪个路径。
+        assertEquals("/setting", failingServer.takeRequest().requestUrl!!.encodedPath)
+        assertEquals("/setting", healthyServer.takeRequest().requestUrl!!.encodedPath)
     }
 
     @Test

@@ -89,6 +89,15 @@ fun JmxError.describe(): JmxErrorDescriptor {
             field = field,
             exchange = exchange
         )
+        is JmxError.EmptyData -> JmxErrorDescriptor(
+            kind = JmxErrorKind.Schema,
+            impact = JmxErrorImpact.Warning,
+            technicalMessage = message,
+            operatorHint = "Server answered code=200 with null data; per-route business semantics decide whether this means no active content.",
+            retryable = retryable,
+            actions = listOf(JmxRecoveryAction.Retry, JmxRecoveryAction.ExportDiagnostics),
+            exchange = exchange
+        )
         is JmxError.Domain -> JmxErrorDescriptor(
             kind = JmxErrorKind.Domain,
             impact = JmxErrorImpact.Warning,
@@ -113,6 +122,7 @@ fun JmxError.exchangeOrNull(): NetworkExchange? {
     return when (this) {
         is JmxError.Api -> exchange
         is JmxError.Decode -> exchange
+        is JmxError.EmptyData -> exchange
         is JmxError.Http -> exchange
         is JmxError.Schema -> exchange
         is JmxError.Domain,

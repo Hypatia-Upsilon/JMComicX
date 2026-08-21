@@ -257,17 +257,6 @@ class ChapterDownloadTaskManager(
     fun list(): List<ChapterDownloadTaskSnapshot> =
         tasks.values.map { it.snapshot }.sortedBy { it.createdAtMillis }
 
-    fun reloadFromStore() {
-        val store = taskStore ?: return
-        val loaded = store.loadAll().map { it.toSnapshot() }
-        loaded.forEach { snapshot ->
-            val existing = tasks[snapshot.id]
-            if (existing == null || existing.snapshot.state != ChapterDownloadTaskState.Running) {
-                tasks[snapshot.id] = TaskRecord(snapshot = snapshot)
-            }
-        }
-    }
-
     private suspend fun runTask(record: TaskRecord) {
         val spec = record.snapshot.spec
         if (record.cancelRequested.get()) {

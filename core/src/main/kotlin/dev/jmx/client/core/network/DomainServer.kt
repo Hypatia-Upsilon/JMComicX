@@ -7,7 +7,11 @@ import dev.jmx.client.core.protocol.JmxProtocolConstants
 import dev.jmx.client.core.result.JmxError
 import dev.jmx.client.core.result.JmxResult
 import dev.jmx.client.core.session.SessionManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -68,60 +72,96 @@ class DomainRefresher(
     private val serverUrls: List<String> = JmxProtocolConstants.DomainServerUrls,
     private val sessionManager: SessionManager? = null
 ) {
+    /**
+     * 刷新 API 域名列表。
+     *
+     * 所有域名服务器并发竞速，先返回可解密内容的那个胜出，其余立即取消。
+     * 原实现是顺序 for 循环：第一个地址不可达时要等它超时（连接 8s + 读 15s）才轮到第二个，
+     * 而这一步挡在冷启动的最前面。两个地址托管在不同 CDN 上、下发的是同一份内容，
+     * 没有先后之分（官方客户端本身也是从 Server 列表里随机取一个），因此谁先到就用谁。
+     */
     suspend fun refresh(): JmxResult<List<ApiEndpoint>> = withContext(Dispatchers.IO) {
-        var lastError: JmxError? = null
+        if (serverUrls.isEmpty()) {
+            return@withContext JmxResult.Failure(JmxError.Domain("未配置域名服务器"))
+        }
         val attempts = mutableListOf<DomainRefreshAttempt>()
-        for (url in serverUrls) {
-            val result = requestAndDecode(url)
-            when (result) {
-                is JmxResult.Success -> {
-                    attempts += DomainRefreshAttempt(url, success = true, message = "${result.value.apiHosts.size} hosts")
-                    val endpoints = when (val replaced = endpointManager.replaceAll(result.value.apiHosts)) {
-                        is JmxResult.Success -> replaced.value
-                        is JmxResult.Failure -> return@withContext replaced
+        val payload = when (val raced = raceServers(attempts)) {
+            is JmxResult.Success -> raced.value
+            is JmxResult.Failure -> return@withContext JmxResult.Failure(
+                JmxError.Domain(
+                    message = buildFailureMessage(attempts, raced.error),
+                    cause = raced.error.cause
+                )
+            )
+        }
+        val endpoints = when (val replaced = endpointManager.replaceAll(payload.apiHosts)) {
+            is JmxResult.Success -> replaced.value
+            is JmxResult.Failure -> return@withContext replaced
+        }
+        when (val synced = sessionManager?.syncAvsCookieToHostsIfPresent(endpoints.map { it.url.toString() })) {
+            is JmxResult.Failure -> return@withContext synced
+            is JmxResult.Success,
+            null -> Unit
+        }
+        JmxResult.Success(endpoints)
+    }
+
+    /** @param attempts 逐个地址的结果，仅在本协程内追加，用于失败时拼出可诊断的信息。 */
+    private suspend fun raceServers(
+        attempts: MutableList<DomainRefreshAttempt>
+    ): JmxResult<DomainServerPayload> = coroutineScope {
+        // 容量取地址数：每个分支都能无阻塞地投递结果，即使已经有赢家、没人再来接收。
+        val results = Channel<Pair<String, JmxResult<DomainServerPayload>>>(capacity = serverUrls.size)
+        val racers = serverUrls.map { url ->
+            launch { results.send(url to requestAndDecode(url)) }
+        }
+        try {
+            var lastError: JmxError? = null
+            repeat(serverUrls.size) {
+                val (url, result) = results.receive()
+                when (result) {
+                    is JmxResult.Success -> {
+                        attempts += DomainRefreshAttempt(url, success = true, message = "${result.value.apiHosts.size} hosts")
+                        return@coroutineScope result
                     }
-                    when (val synced = sessionManager?.syncAvsCookieToHostsIfPresent(endpoints.map { it.url.toString() })) {
-                        is JmxResult.Failure -> return@withContext synced
-                        is JmxResult.Success,
-                        null -> Unit
+                    is JmxResult.Failure -> {
+                        lastError = result.error
+                        attempts += DomainRefreshAttempt(url, success = false, message = result.error.message)
                     }
-                    return@withContext JmxResult.Success(endpoints)
-                }
-                is JmxResult.Failure -> {
-                    lastError = result.error
-                    attempts += DomainRefreshAttempt(url, success = false, message = result.error.message)
                 }
             }
+            JmxResult.Failure(lastError ?: JmxError.Domain("全部域名服务器刷新失败"))
+        } finally {
+            // 有赢家后不再等其余分支：requestAndDecode 走可取消的 awaitResponse，
+            // 取消会真正中断底层调用（原先的阻塞 execute() 是打不断的）。
+            racers.forEach { it.cancel() }
         }
-        JmxResult.Failure(
-            JmxError.Domain(
-                message = buildFailureMessage(attempts, lastError),
-                cause = lastError?.cause
-            )
-        )
     }
 
     fun serverUrls(): List<String> = serverUrls
 
-    private fun requestAndDecode(url: String): JmxResult<DomainServerPayload> {
-        return runCatching {
-            val request = Request.Builder()
-                .url(url)
-                .header("user-agent", JmxProtocolConstants.MobileUserAgent)
-                .get()
-                .build()
-            okHttpClient.newCall(request).execute().use { response ->
+    private suspend fun requestAndDecode(url: String): JmxResult<DomainServerPayload> {
+        val request = Request.Builder()
+            .url(url)
+            .header("user-agent", JmxProtocolConstants.MobileUserAgent)
+            .get()
+            .build()
+        return try {
+            okHttpClient.newCall(request).awaitResponse().use { response ->
                 val body = response.body.string()
                 if (!response.isSuccessful) {
                     return JmxResult.Failure(JmxError.Http(response.code, "域名服务器请求失败：${response.code}"))
                 }
                 decoder.decode(body)
             }
-        }.getOrElse {
-            val error = if (it is IOException) {
-                JmxError.Network("域名服务器网络请求失败", it)
+        } catch (cancelled: CancellationException) {
+            // 竞速失败方会被取消，这不是"域名服务器坏了"，不能降级成普通失败往上报。
+            throw cancelled
+        } catch (failure: Throwable) {
+            val error = if (failure is IOException) {
+                JmxError.Network("域名服务器网络请求失败", failure)
             } else {
-                JmxError.Unknown(it.message ?: "域名服务器未知错误", it)
+                JmxError.Unknown(failure.message ?: "域名服务器未知错误", failure)
             }
             JmxResult.Failure(error)
         }

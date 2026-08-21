@@ -96,7 +96,7 @@ class JmxLiveReadingRunnerTest {
         val albumReq = server.takeRequest()
         val templateReq = server.takeRequest()
         val imageReq = server.takeRequest()
-        assertEquals("/setting", settingReq.path)
+        assertEquals("/setting", settingReq.requestUrl!!.encodedPath)
         assertTrue(albumReq.path!!.startsWith("/album"))
         assertTrue(templateReq.path!!.startsWith("/chapter_view_template"))
         assertTrue(imageReq.path!!.contains("/media/photos/"))
