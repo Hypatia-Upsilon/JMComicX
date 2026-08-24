@@ -95,4 +95,5 @@ dependencies {
     implementation(libs.opencc4j)
 
     testImplementation(libs.junit)
+    testImplementation(libs.json)
 }

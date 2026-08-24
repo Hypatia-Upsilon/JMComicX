@@ -39,6 +39,7 @@ internal data class JmxRoute private constructor(
         ABOUT("关于"),
         THIRD_PARTY("第三方开源库"),
         SETTINGS("设置"),
+        GROUP_ORDER("分组序列"),
     }
 
     companion object {
@@ -49,6 +50,7 @@ internal data class JmxRoute private constructor(
         val ABOUT = JmxRoute(Destination.ABOUT)
         val THIRD_PARTY = JmxRoute(Destination.THIRD_PARTY)
         val SETTINGS = JmxRoute(Destination.SETTINGS)
+        val GROUP_ORDER = JmxRoute(Destination.GROUP_ORDER)
     }
 }
 

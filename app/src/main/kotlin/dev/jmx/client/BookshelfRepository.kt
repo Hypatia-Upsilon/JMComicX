@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.core.content.edit
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.pow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -27,6 +28,18 @@ internal data class BookshelfGroup(
     val authorRules: List<String> = emptyList(),
     val authorMatchSource: BookshelfAuthorMatchSource = BookshelfAuthorMatchSource.FAVORITES,
     val createdAt: Long,
+    val updatedAt: Long,
+)
+
+/**
+ * 一个分组的使用热度。
+ *
+ * 只存两个数、不存访问历史：[score] 是"折算到 [updatedAt] 那一刻"的衰减计数，
+ * 要比较时再统一折算到当前时刻（见 [decayedGroupScore]）。
+ */
+internal data class BookshelfGroupUsage(
+    val id: String,
+    val score: Double,
     val updatedAt: Long,
 )
 
@@ -101,8 +114,54 @@ internal class BookshelfRepository(
         readEntries().firstOrNull { it.albumId == albumId }
     }
 
+    /**
+     * 分组的展示顺序，也就是 tab 栏从左到右的顺序。
+     *
+     * 自动排列开着时按热度降序，关掉时按用户手动拖出来的 [BOOKSHELF_GROUP_ORDER_KEY]。
+     * 两份顺序各存各的：自动排列只覆盖显示，关掉后手动顺序原样回来。
+     */
     fun groups(): List<BookshelfGroup> = synchronized(lock) {
-        readGroups().sortedBy(BookshelfGroup::createdAt)
+        orderBookshelfGroups(
+            groups = readGroups(),
+            order = readGroupOrder(),
+            autoOrder = autoGroupOrder(),
+            usage = readGroupUsage(),
+            now = now(),
+        )
+    }
+
+    fun autoGroupOrder(): Boolean = preferences.getBoolean(BOOKSHELF_GROUP_AUTO_ORDER_KEY, false)
+
+    fun setAutoGroupOrder(enabled: Boolean) {
+        preferences.edit { putBoolean(BOOKSHELF_GROUP_AUTO_ORDER_KEY, enabled) }
+    }
+
+    /** 保存手动顺序；表里没提到的分组仍按 createdAt 缀在后面。 */
+    fun setGroupOrder(orderedIds: List<String>) = synchronized(lock) {
+        val known = readGroups().mapTo(mutableSetOf(), BookshelfGroup::id)
+        writeGroupOrder(orderedIds.distinct().filter { it in known })
+    }
+
+    /**
+     * 记一次分组访问。
+     *
+     * 写入是 O(1)：把旧分数衰减到此刻再 +1，不追加历史。
+     * 只在用户真的切到某个分组时调用，"全部"不计——它不参与排序。
+     */
+    fun recordGroupVisit(groupId: String) {
+        if (groupId == ALL_BOOKSHELF_GROUP_ID) return
+        synchronized(lock) {
+            if (readGroups().none { it.id == groupId }) return
+            val timestamp = now()
+            val current = readGroupUsage()
+            val existing = current.firstOrNull { it.id == groupId }
+            val updated = BookshelfGroupUsage(
+                id = groupId,
+                score = decayedGroupScore(existing, timestamp) + 1.0,
+                updatedAt = timestamp,
+            )
+            writeGroupUsage(current.filterNot { it.id == groupId } + updated)
+        }
     }
 
     fun contains(albumId: String): Boolean = entry(albumId) != null
@@ -161,10 +220,8 @@ internal class BookshelfRepository(
     ): BookshelfGroup? = synchronized(lock) {
         val normalizedName = name.trim().takeIf(String::isNotEmpty) ?: return@synchronized null
         val current = readGroups()
-        if (
-            current.size >= MAX_BOOKSHELF_GROUPS ||
-            current.any { it.name.equals(normalizedName, ignoreCase = true) }
-        ) {
+        // 这里刻意没有数量上限：40 个的旧上限只会让第 41 次创建静默失败（issue #10）。
+        if (current.any { it.name.equals(normalizedName, ignoreCase = true) }) {
             return@synchronized null
         }
         val normalizedTags = tagRules.mapNotNull(::normalizeSearchTag).distinct()
@@ -231,6 +288,10 @@ internal class BookshelfRepository(
                 if (groupId in entry.groupIds) entry.copy(groupIds = entry.groupIds - groupId) else entry
             },
         )
+        // 顺手清掉这个分组的顺序与热度残留：留着不会影响排序（两处都按现存分组过滤），
+        // 但同名分组被重建后会莫名继承旧热度。
+        writeGroupOrder(readGroupOrder().filterNot { it == groupId })
+        writeGroupUsage(readGroupUsage().filterNot { it.id == groupId })
         true
     }
 
@@ -327,8 +388,22 @@ internal class BookshelfRepository(
 
     private fun writeGroups(groups: List<BookshelfGroup>) {
         val array = JSONArray()
-        groups.take(MAX_BOOKSHELF_GROUPS).forEach { array.put(it.toJson()) }
+        groups.take(BOOKSHELF_GROUP_SAFETY_LIMIT).forEach { array.put(it.toJson()) }
         preferences.edit { putString(BOOKSHELF_GROUPS_KEY, array.toString()) }
+    }
+
+    private fun readGroupOrder(): List<String> =
+        decodeBookshelfGroupOrder(preferences.getString(BOOKSHELF_GROUP_ORDER_KEY, null))
+
+    private fun writeGroupOrder(orderedIds: List<String>) {
+        preferences.edit { putString(BOOKSHELF_GROUP_ORDER_KEY, encodeBookshelfGroupOrder(orderedIds)) }
+    }
+
+    private fun readGroupUsage(): List<BookshelfGroupUsage> =
+        decodeBookshelfGroupUsage(preferences.getString(BOOKSHELF_GROUP_USAGE_KEY, null))
+
+    private fun writeGroupUsage(usage: List<BookshelfGroupUsage>) {
+        preferences.edit { putString(BOOKSHELF_GROUP_USAGE_KEY, encodeBookshelfGroupUsage(usage)) }
     }
 }
 
@@ -559,6 +634,110 @@ private fun JSONArray.toBookshelfGroups(): List<BookshelfGroup> {
 }
 
 /**
+ * 把一条热度折算到 [now] 时刻。
+ *
+ * 半衰期 [BOOKSHELF_GROUP_USAGE_HALF_LIFE_MILLIS]：7 天不碰，分数减半。
+ * 这样"常看"与"最近看"是同一个数在管，不需要分别存频次和时间戳再加权。
+ * [usage] 为 null（从未访问）算 0；时钟回拨导致的负时差按 0 处理，否则分数会被放大。
+ */
+internal fun decayedGroupScore(usage: BookshelfGroupUsage?, now: Long): Double {
+    if (usage == null || usage.score <= 0.0) return 0.0
+    val elapsed = (now - usage.updatedAt).coerceAtLeast(0L)
+    if (elapsed == 0L) return usage.score
+    val halfLives = elapsed.toDouble() / BOOKSHELF_GROUP_USAGE_HALF_LIFE_MILLIS
+    return usage.score * 2.0.pow(-halfLives)
+}
+
+/**
+ * 分组的最终展示顺序。
+ *
+ * [autoOrder] 关：按 [order] 里的下标排，没登记过的分组按 createdAt 追加到末尾——
+ * 新建的分组总是出现在最右边，符合"刚建的在后面"的直觉。
+ * [autoOrder] 开：按折算到 [now] 的热度降序，并列时退回手动顺序、再退回 createdAt，
+ * 保证同样的输入永远得到同样的顺序（否则 tab 栏会在两次进入之间莫名换位）。
+ *
+ * 手动顺序不会被自动排列覆盖写掉，所以关掉开关就原样回来。
+ */
+internal fun orderBookshelfGroups(
+    groups: List<BookshelfGroup>,
+    order: List<String>,
+    autoOrder: Boolean,
+    usage: List<BookshelfGroupUsage>,
+    now: Long,
+): List<BookshelfGroup> {
+    if (groups.size <= 1) return groups
+    val manualRank = order.withIndex().associate { (index, id) -> id to index }
+    // 手动名次缺失时排在所有登记过的分组之后，彼此再按 createdAt 分先后。
+    fun manualOf(group: BookshelfGroup): Int = manualRank[group.id] ?: Int.MAX_VALUE
+    if (!autoOrder) {
+        return groups.sortedWith(
+            compareBy<BookshelfGroup> { manualOf(it) }
+                .thenBy(BookshelfGroup::createdAt)
+                .thenBy(BookshelfGroup::id),
+        )
+    }
+    val usageById = usage.associateBy(BookshelfGroupUsage::id)
+    return groups.sortedWith(
+        compareByDescending<BookshelfGroup> { decayedGroupScore(usageById[it.id], now) }
+            .thenBy { manualOf(it) }
+            .thenBy(BookshelfGroup::createdAt)
+            .thenBy(BookshelfGroup::id),
+    )
+}
+
+/**
+ * 把 [from] 位置的分组挪到 [to] 位置（拖拽落位）。
+ *
+ * 与 swap 的区别：中间的元素整体让位，这才是拖拽的视觉预期。
+ * 越界或原地不动时原样返回，调用方不必先判断。
+ */
+internal fun moveGroupOrder(order: List<String>, from: Int, to: Int): List<String> {
+    if (from == to || from !in order.indices || to !in order.indices) return order
+    val mutable = order.toMutableList()
+    mutable.add(to, mutable.removeAt(from))
+    return mutable
+}
+
+internal fun encodeBookshelfGroupOrder(orderedIds: List<String>): String =
+    JSONArray(orderedIds).toString()
+
+internal fun decodeBookshelfGroupOrder(encoded: String?): List<String> {
+    val array = runCatching { JSONArray(encoded ?: return emptyList()) }.getOrNull() ?: return emptyList()
+    return buildList {
+        repeat(array.length()) { index ->
+            array.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
+        }
+    }.distinct()
+}
+
+internal fun encodeBookshelfGroupUsage(usage: List<BookshelfGroupUsage>): String {
+    val array = JSONArray()
+    usage.forEach { item ->
+        array.put(
+            JSONObject().apply {
+                put("id", item.id)
+                put("score", item.score)
+                put("updated_at", item.updatedAt)
+            },
+        )
+    }
+    return array.toString()
+}
+
+internal fun decodeBookshelfGroupUsage(encoded: String?): List<BookshelfGroupUsage> {
+    val array = runCatching { JSONArray(encoded ?: return emptyList()) }.getOrNull() ?: return emptyList()
+    val parsed = mutableListOf<BookshelfGroupUsage>()
+    repeat(array.length()) { index ->
+        val item = array.optJSONObject(index) ?: return@repeat
+        val id = item.optString("id").trim().takeIf(String::isNotEmpty) ?: return@repeat
+        val score = item.optDouble("score", 0.0)
+        if (!score.isFinite() || score <= 0.0) return@repeat
+        parsed += BookshelfGroupUsage(id = id, score = score, updatedAt = item.optLong("updated_at", 0L))
+    }
+    return parsed.distinctBy(BookshelfGroupUsage::id)
+}
+
+/**
  * 导出范围裁剪。
  *
  * [groupIds] 为 null 表示"全部"，此时 [includeGroups] 决定要不要带上分组定义；
@@ -589,7 +768,7 @@ internal fun bookshelfSnapshotOf(
 internal fun replaceBookshelfWith(
     snapshot: BookshelfSnapshot,
 ): Pair<BookshelfSnapshot, BookshelfImportOutcome> {
-    val groups = snapshot.groups.distinctBy(BookshelfGroup::id).take(MAX_BOOKSHELF_GROUPS)
+    val groups = snapshot.groups.distinctBy(BookshelfGroup::id).take(BOOKSHELF_GROUP_SAFETY_LIMIT)
     val validGroupIds = groups.mapTo(mutableSetOf(), BookshelfGroup::id)
     val incoming = snapshot.entries.distinctBy(BookshelfEntry::albumId)
     val entries = incoming
@@ -628,7 +807,7 @@ internal fun mergeBookshelfWith(
             reusedGroups++
             return@forEach
         }
-        if (groups.size + newGroups.size >= MAX_BOOKSHELF_GROUPS) return@forEach
+        if (groups.size + newGroups.size >= BOOKSHELF_GROUP_SAFETY_LIMIT) return@forEach
         // id 撞车只会发生在"导出自己的书架再导回来"，换个新 id 即可，名称归并已经兜住了重复。
         val id = if (groups.any { it.id == group.id }) freshGroupId() else group.id
         remappedGroupIds[group.id] = id
@@ -679,7 +858,7 @@ internal fun encodeBookshelfSnapshot(snapshot: BookshelfSnapshot, exportedAt: Lo
     val entries = JSONArray()
     snapshot.entries.take(MAX_BOOKSHELF_ENTRIES).forEach { entries.put(it.toJson()) }
     val groups = JSONArray()
-    snapshot.groups.take(MAX_BOOKSHELF_GROUPS).forEach { groups.put(it.toJson()) }
+    snapshot.groups.take(BOOKSHELF_GROUP_SAFETY_LIMIT).forEach { groups.put(it.toJson()) }
     return JSONObject().apply {
         put("format", BOOKSHELF_TRANSFER_FORMAT)
         put("version", BOOKSHELF_TRANSFER_VERSION)
@@ -714,7 +893,20 @@ private const val BOOKSHELF_PREFERENCES = "jmx_bookshelf"
 private const val BOOKSHELF_ENTRIES_KEY = "entries"
 private const val BOOKSHELF_GROUPS_KEY = "groups"
 private const val BOOKSHELF_SORT_KEY = "sort_order"
+private const val BOOKSHELF_GROUP_ORDER_KEY = "group_order"
+private const val BOOKSHELF_GROUP_USAGE_KEY = "group_usage"
+private const val BOOKSHELF_GROUP_AUTO_ORDER_KEY = "group_auto_order"
 private const val LEGACY_RECENTLY_ADDED_SORT = "RECENTLY_ADDED"
 private const val MAX_BOOKSHELF_ENTRIES = 500
-private const val MAX_BOOKSHELF_GROUPS = 40
+
+/**
+ * 分组数量的安全阀，不是产品意义上的上限。
+ *
+ * 旧的 40 上限会让第 41 次"添加分组"静默失败（issue #10），已经去掉；
+ * 这里留一个远高于任何正常用法的数，只为挡住畸形导入文件把整份 SharedPreferences 撑爆。
+ */
+private const val BOOKSHELF_GROUP_SAFETY_LIMIT = 1000
+
+/** 分组热度的半衰期：7 天不访问，分数减半。 */
+internal const val BOOKSHELF_GROUP_USAGE_HALF_LIFE_MILLIS = 7L * 24 * 60 * 60 * 1000
 private val BOOKSHELF_TAG_RULE_DELIMITERS = Regex("[\\s,，、;；]+")

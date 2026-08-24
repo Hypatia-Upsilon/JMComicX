@@ -9,6 +9,7 @@ coil = "3.5.0"
 okhttp = "5.3.2"
 gson = "2.13.2"
 junit = "4.13.2"
+json = "20240303"
 miuix = "0.9.4-rc01"
 miuix-nav = "0.9.4-rc01"
 opencc4j = "1.14.0"
@@ -26,6 +27,9 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+# 单元测试用的真 org.json：android.jar 里那套是抛 "Stub!" 的空壳，
+# 分组顺序/热度的编解码正是走 JSONArray，不装这个就只能整段跳过不测。
+json = { group = "org.json", name = "json", version.ref = "json" }
 miuix-icons-android = { group = "top.yukonga.miuix.kmp", name = "miuix-icons-android", version.ref = "miuix" }
 miuix-nav-android = { group = "top.yukonga.miuix.kmp", name = "miuix-nav-android", version.ref = "miuix-nav" }
 miuix-blur-android = { group = "top.yukonga.miuix.kmp", name = "miuix-blur-android", version.ref = "miuix" }

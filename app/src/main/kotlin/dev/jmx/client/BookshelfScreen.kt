@@ -34,10 +34,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -119,6 +117,9 @@ internal fun BookshelfScreen(
     revision: Int,
     liftedAlbumId: String?,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
+    onOpenGroupOrder: () -> Unit = {},
+    pendingGroupId: String? = null,
+    onPendingGroupConsumed: () -> Unit = {},
     barBackdrop: top.yukonga.miuix.kmp.blur.LayerBackdrop? = null,
     topBarBlurStyle: dev.jmx.client.effect.TopBarBlurStyle = dev.jmx.client.effect.TopBarBlurStyle.GAUSSIAN,
 ) {
@@ -301,10 +302,35 @@ internal fun BookshelfScreen(
             selectionMode = false
             selectedIds = emptySet()
             selectedGroupId = settledGroupId
+            // 记一次访问喂给"自动排列"。放在这里而不是点击 tab 时：滑动切换同样算看过一次，
+            // 而"全部"不参与排序，仓库层会自行忽略。
+            repository.recordGroupVisit(settledGroupId)
         }
     }
 
+    /**
+     * 从分组序列页点某个分组回来后，直接落到它那一页。
+     *
+     * 用 [pagerState.scrollToPage] 而不是 animate：跨十几个分组的动画既慢又会把中间每一页都组合一遍。
+     */
+    LaunchedEffect(pendingGroupId, groups) {
+        val target = pendingGroupId ?: return@LaunchedEffect
+        val targetPage = if (target == ALL_BOOKSHELF_GROUP_ID) {
+            0
+        } else {
+            groups.indexOfFirst { it.id == target }.takeIf { it >= 0 }?.plus(1)
+        }
+        onPendingGroupConsumed()
+        if (targetPage == null) return@LaunchedEffect
+        selectionMode = false
+        selectedIds = emptySet()
+        if (pagerState.currentPage != targetPage) pagerState.scrollToPage(targetPage)
+    }
+
     LaunchedEffect(selectedGroupId, groups) {
+        // 有待处理的定位请求时让上面那个效果先落位：这里读到的 selectedGroupId 还是上次的分组，
+        // 会把刚跳过去的分页又拽回来。落位后分页 settle 会更新 selectedGroupId，本效果自然重跑。
+        if (pendingGroupId != null) return@LaunchedEffect
         val targetPage = (groups.indexOfFirst { it.id == selectedGroupId } + 1).coerceAtLeast(0)
         if (pagerState.currentPage != targetPage && !pagerState.isScrollInProgress) {
             pagerState.scrollToPage(targetPage)
@@ -334,6 +360,14 @@ internal fun BookshelfScreen(
             )
             add(
                 DropdownItem(
+                    text = "分组序列",
+                    enabled = groups.isNotEmpty(),
+                    summary = if (groups.isEmpty()) "还没有分组" else "调整 tab 顺序 · 快速定位",
+                    onClick = onOpenGroupOrder,
+                ),
+            )
+            add(
+                DropdownItem(
                     text = "排序方式",
                     summary = sortOrder.label,
                     children = sortChildren,
@@ -343,6 +377,14 @@ internal fun BookshelfScreen(
                 add(
                     DropdownItem(
                         text = "删除当前分组",
+                        icon = { modifier ->
+                            Icon(
+                                imageVector = MiuixIcons.Delete,
+                                contentDescription = null,
+                                modifier = modifier,
+                                tint = MiuixTheme.colorScheme.error,
+                            )
+                        },
                         onClick = { pendingGroupDeletion = group },
                     ),
                 )
@@ -833,6 +875,12 @@ internal fun BookshelfScreen(
                 reload()
             },
             modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.textButtonColors(
+                color = MiuixTheme.colorScheme.errorContainer,
+                disabledColor = MiuixTheme.colorScheme.errorContainer.copy(alpha = 0.38f),
+                textColor = MiuixTheme.colorScheme.onErrorContainer,
+                disabledTextColor = MiuixTheme.colorScheme.onErrorContainer.copy(alpha = 0.38f),
+            ),
         )
     }
 
@@ -1564,8 +1612,9 @@ private fun BookshelfExportDialog(
 }
 
 /**
- * 分组多选清单。高度封顶后内部滚动：分组最多 40 个，不封顶弹窗会顶穿屏幕，
- * 把下面的按钮挤出可见区域。
+ * 分组多选清单。高度封顶后内部滚动：不封顶弹窗会顶穿屏幕，把下面的按钮挤出可见区域。
+ * 分组数量没有上限（issue #10），所以用 LazyColumn 而不是 Column——
+ * 上百个分组时不会一次性组合出上百行只为让用户看见其中三行。
  */
 @Composable
 private fun BookshelfGroupChecklist(
@@ -1574,13 +1623,12 @@ private fun BookshelfGroupChecklist(
     onToggle: (String) -> Unit,
     counts: Map<String, Int>? = null,
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = 260.dp)
-            .verticalScroll(rememberScrollState()),
+            .heightIn(max = 260.dp),
     ) {
-        groups.forEach { group ->
+        items(items = groups, key = BookshelfGroup::id) { group ->
             val selected = group.id in selectedGroupIds
             val itemColor by animateColorAsState(
                 targetValue = if (selected) {
@@ -1630,7 +1678,7 @@ private fun BookshelfGroupChecklist(
 }
 
 /** 一次读盘算出"全部"和每个分组的漫画数，避免在弹窗里按分组逐个读。 */
-private fun bookshelfGroupCounts(
+internal fun bookshelfGroupCounts(
     repository: BookshelfRepository,
     groups: List<BookshelfGroup>,
 ): Map<String, Int> {
