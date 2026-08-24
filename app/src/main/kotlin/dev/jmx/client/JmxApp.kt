@@ -147,6 +147,8 @@ internal fun JmxApp(
     var detailRequest by remember { mutableStateOf<AlbumDetailTransitionRequest?>(null) }
     var readerRequest by remember { mutableStateOf<ReaderLaunchRequest?>(null) }
     var bookshelfRevision by remember { mutableIntStateOf(0) }
+    // 从分组序列页点了某个分组：书架重建后由它把分页落到那一格，消费完立刻清空。
+    var pendingBookshelfGroupId by remember { mutableStateOf<String?>(null) }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var pendingSearchQuery by rememberSaveable { mutableStateOf<String?>(null) }
     val searchTransitionProgress by animateFloatAsState(
@@ -551,6 +553,11 @@ internal fun JmxApp(
                                                 )
                                             }
                                         },
+                                        onOpenGroupOrder = {
+                                            navigateAccount(JmxRoute.GROUP_ORDER)
+                                        },
+                                        pendingGroupId = pendingBookshelfGroupId,
+                                        onPendingGroupConsumed = { pendingBookshelfGroupId = null },
                                         topBarBlurStyle = topBarBlurStyle,
                                     )
                                     else -> {
@@ -609,6 +616,22 @@ internal fun JmxApp(
                             innerPadding = PaddingValues(),
                             onBack = ::navigateAccountBack,
                             onThirdParty = { navigateAccount(JmxRoute.THIRD_PARTY) },
+                        )
+                        // 分组序列自带顶栏（下拉菜单 + 完成），套不进下面 else 里那个通用顶栏。
+                        JmxRoute.GROUP_ORDER -> BookshelfGroupOrderScreen(
+                            innerPadding = PaddingValues(),
+                            repository = bookshelfRepository,
+                            onBack = {
+                                // 顺序可能被改过，回书架时让它重新读一遍分组。
+                                bookshelfRevision++
+                                navigateAccountBack()
+                            },
+                            onLocateGroup = { groupId ->
+                                pendingBookshelfGroupId = groupId
+                                bookshelfRevision++
+                                navigateAccountBack()
+                            },
+                            topBarBlurStyle = topBarBlurStyle,
                         )
                         else -> {
                             val pageBackdrop = rememberBarBackdrop()
@@ -737,6 +760,7 @@ internal fun JmxApp(
                                 )
                                 JmxRoute.MAIN,
                                 JmxRoute.ABOUT,
+                                JmxRoute.GROUP_ORDER,
                                 -> Unit
                             }
                         }
