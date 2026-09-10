@@ -47,6 +47,14 @@ object JmxMagicConstants {
     const val SUB_DOUJIN_CG = "CG"
     const val SUB_SINGLE_YOUTH = "youth"
 
+    /**
+     * 搜索 main_tag：0 = 全站（标题/标签/作者等全部字段），3 = 仅标签。
+     * 标签过滤已通过 search_query 的 `+`/`-` 语法在服务端完成，因此搜索统一用全站模式，
+     * 让自由关键词仍能命中标题与作者。
+     */
+    const val MAIN_TAG_ALL = 0
+    const val MAIN_TAG_TAG = 3
+
     const val DEFAULT_AUTHOR = "default_author"
     const val PAGE_SIZE_SEARCH = 80
     const val PAGE_SIZE_FAVORITE = 20
