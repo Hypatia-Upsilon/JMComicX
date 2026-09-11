@@ -63,6 +63,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -101,6 +103,7 @@ import top.yukonga.miuix.kmp.utils.SinkFeedback
  * @param itemSpacing 标签间距。
  * @param contentPadding 滚动内容首尾内衬，随内容一起滚动。
  * @param minItemWidth 单个标签最小宽度，避免"熱"这类单字标签过窄。
+ * @param badgedTabs 需要在右上角画红点的标签下标集合，用于"这一组里有内容更新了"之类的提示。
  * @param selectionProgress 连续选中位置，例如 `{ pagerState.currentPage + pagerState.currentPageOffsetFraction }`。
  *   提供时指示器与标签行滚动都实时跟随该值（跟手），不再等分页 settle；为 null 时按 [selectedTabIndex] 做离散动画。
  * @param scrollState 横向滚动状态，传入可外部控制。
@@ -120,6 +123,7 @@ fun JmxTabRow(
     itemSpacing: Dp = JmxTabRowDefaults.ItemSpacing,
     contentPadding: Dp = JmxTabRowDefaults.ContentPadding,
     minItemWidth: Dp = JmxTabRowDefaults.MinItemWidth,
+    badgedTabs: Set<Int> = emptySet(),
     selectionProgress: (() -> Float)? = null,
     scrollState: ScrollState = rememberScrollState(),
     interactionSource: MutableInteractionSource? = null,
@@ -296,6 +300,7 @@ fun JmxTabRow(
                         containerColor = colors.containerColor(emphasis),
                         outlineColor = colors.outlineColor(emphasis),
                         color = colors.contentColor(emphasis),
+                        hasBadge = index in badgedTabs,
                         interactionSource = interactionSource,
                         indication = indication,
                         onWidthMeasured = { width ->
@@ -319,16 +324,40 @@ private fun JmxTabItem(
     containerColor: Color,
     outlineColor: Color,
     color: Color,
+    hasBadge: Boolean,
     interactionSource: MutableInteractionSource?,
     indication: Indication?,
     onWidthMeasured: (Int) -> Unit,
 ) {
+    // 红点用 drawWithContent 画在标签之上，而不是塞进内容里：标签宽度是实测的，
+    // 多一个子元素就会把宽度撑开，指示器的跟手插值随之跑偏。
+    val badgeColor = MiuixTheme.colorScheme.error
     Box(
         modifier = Modifier
             .fillMaxHeight()
             // 只抬高下限、不设上限：标签按文字自适应变宽。
             .widthIn(min = minWidth)
             .onSizeChanged { onWidthMeasured(it.width) }
+            // 红点画在这里而不是内容里：标签宽度是实测的，多塞一个子元素就会把宽度撑开，
+            // 指示器的跟手插值随之跑偏。放在 padding 之前才能拿到标签的完整尺寸。
+            .then(
+                if (hasBadge) {
+                    Modifier.drawWithContent {
+                        drawContent()
+                        val radius = TAB_BADGE_RADIUS.toPx()
+                        drawCircle(
+                            color = badgeColor,
+                            radius = radius,
+                            center = Offset(
+                                x = size.width - radius - TAB_BADGE_INSET.toPx(),
+                                y = radius + TAB_BADGE_INSET.toPx(),
+                            ),
+                        )
+                    }
+                } else {
+                    Modifier
+                },
+            )
             // 半透明填充：顶栏是模糊层，标签背后就是滚动的漫画封面，只靠模糊无法保证
             // 文字对比度（封面亮色时未选中标签的文字与描边基本看不见）。
             // 随色块覆盖度淡出到全透明，否则会把滑过来的强调色块盖成一片脏白。
@@ -471,3 +500,9 @@ data class JmxTabRowColors(
 private const val EMPHASIS_STEPS = 8
 
 private const val INDICATOR_DURATION_MILLIS = 200
+
+/** 标签红点半径。对齐 MIUIX [top.yukonga.miuix.kmp.basic.BadgeDefaults] 的 6dp 直径。 */
+private val TAB_BADGE_RADIUS = 3.dp
+
+/** 红点距标签右上角的内缩量，让圆点完整落在圆角之内。 */
+private val TAB_BADGE_INSET = 6.dp

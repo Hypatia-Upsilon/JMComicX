@@ -280,6 +280,7 @@ internal fun AlbumItem(
     coverLifted: Boolean,
     onSelected: (HomeAlbum, Rect) -> Unit,
     onLongSelected: (() -> Unit)? = null,
+    updateChapters: Int = 0,
 ) {
     var coverBounds by remember(album.id) { mutableStateOf(Rect.Zero) }
     val select = {
@@ -289,11 +290,23 @@ internal fun AlbumItem(
     }
     val content: @Composable () -> Unit = {
         Column(modifier = Modifier.fillMaxWidth()) {
-            AlbumCover(
-                album = album,
-                visible = !coverLifted,
-                onBoundsChanged = { coverBounds = it },
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                AlbumCover(
+                    album = album,
+                    visible = !coverLifted,
+                    onBoundsChanged = { coverBounds = it },
+                )
+                // 角标画在封面外层：封面会被详情页转场"抬起"做共享元素动画，
+                // 画进 AlbumCover 里就会跟着一起飞走。
+                if (updateChapters > 0 && !coverLifted) {
+                    AlbumUpdateChapterBadge(
+                        chapters = updateChapters,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp),
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(9.dp))
             Text(
                 text = album.name,
@@ -396,9 +409,32 @@ private fun AlbumCover(
     }
 }
 
+/**
+ * 封面右上角的"更新 N 章"提示。
+ *
+ * 用 error 配色而不是 primary：这是"有新东西"的通知，和"已选中/已启用"不是一类语义，
+ * 混用会让书架里选中态和更新态看起来一样。
+ */
 @Composable
-private fun FailedCover(modifier: Modifier = Modifier) {
-    Column(
+private fun AlbumUpdateChapterBadge(chapters: Int, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = MiuixTheme.colorScheme.error,
+    ) {
+        Text(
+            text = "更新${if (chapters > 99) "99+" else chapters.toString()}章",
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MiuixTheme.textStyles.footnote2,
+            fontWeight = FontWeight.SemiBold,
+            color = MiuixTheme.colorScheme.onError,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun FailedCover(modifier: Modifier = Modifier) {    Column(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 8.dp),

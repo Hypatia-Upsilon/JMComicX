@@ -122,8 +122,35 @@ internal fun JmxApp(
     var favoriteSortOrder by remember(settingsRepository) {
         mutableStateOf(settingsRepository.favoriteSortOrder())
     }
+    var favoriteSortDirection by remember(settingsRepository) {
+        mutableStateOf(settingsRepository.favoriteSortDirection())
+    }
     val bookshelfRepository = remember(applicationContext) {
         BookshelfRepository(applicationContext)
+    }
+    val albumUpdateCenter = remember(
+        applicationContext,
+        homeRepository,
+        bookshelfRepository,
+        accountDataRepository,
+    ) {
+        AlbumUpdateCenter(
+            context = applicationContext,
+            core = homeRepository.core,
+            bookshelfRepository = bookshelfRepository,
+            accountDataRepository = accountDataRepository,
+        )
+    }
+    val albumUpdateRecords by albumUpdateCenter.records.collectAsState()
+    val scanningAlbumUpdates by albumUpdateCenter.scanning.collectAsState()
+    val albumUpdateSummary = remember(albumUpdateRecords, scanningAlbumUpdates) {
+        val pending = albumUpdateRecords.values.count(AlbumUpdateRecord::hasUpdate)
+        when {
+            scanningAlbumUpdates -> "正在检查书架与收藏中的漫画"
+            albumUpdateRecords.isEmpty() -> "还没有检查过"
+            pending > 0 -> "$pending 部漫画有更新"
+            else -> "已跟踪 ${albumUpdateRecords.size} 部漫画，暂无更新"
+        }
     }
     val coroutineScope = rememberCoroutineScope()
     var accountProfile by remember(accountRepository) { mutableStateOf(accountRepository.restore()) }
@@ -261,6 +288,26 @@ internal fun JmxApp(
                 AutoCheckInResult.FAILED -> Unit
             }
         }
+    }
+
+    /**
+     * 后台更新扫描。
+     *
+     * 冷启动与每次回到前台各探一次，真正出不出网由 [AlbumUpdateCenter.isStale] 决定
+     * （一轮扫描是"每部漫画一次 /album"，不能随手就打）。
+     * 登录之后才把收藏纳进来：未登录时收藏接口拿不到东西。
+     */
+    LaunchedEffect(
+        accountProfile?.id,
+        accountSessionRestored,
+        foregroundRevision,
+        bookshelfRevision,
+        albumUpdateCenter,
+    ) {
+        albumUpdateCenter.scan(
+            includeFavorites = accountProfile != null && accountSessionRestored,
+            force = false,
+        )
     }
 
     LaunchedEffect(homeRepository, homeRequestId) {
@@ -559,6 +606,15 @@ internal fun JmxApp(
                                         pendingGroupId = pendingBookshelfGroupId,
                                         onPendingGroupConsumed = { pendingBookshelfGroupId = null },
                                         topBarBlurStyle = topBarBlurStyle,
+                                        updateRecords = albumUpdateRecords,
+                                        onRefresh = {
+                                            // 下拉刷新走强制扫描：用户明确要求"现在就看"，
+                                            // 不能被最小扫描间隔挡住。
+                                            albumUpdateCenter.scan(
+                                                includeFavorites = accountProfile != null,
+                                                force = true,
+                                            )
+                                        },
                                     )
                                     else -> {
                                         val pageBackdrop = rememberBarBackdrop()
@@ -604,6 +660,8 @@ internal fun JmxApp(
                                             onHistory = { openProtectedAccountPage(JmxRoute.HISTORY) },
                                             onDaily = { openProtectedAccountPage(JmxRoute.DAILY) },
                                             onAbout = { navigateAccount(JmxRoute.ABOUT) },
+                                            favoriteUpdateCount = albumUpdateRecords.values
+                                                .count(AlbumUpdateRecord::hasUpdate),
                                         )
                                         }
                                     }
@@ -659,9 +717,14 @@ internal fun JmxApp(
                                             if (route == JmxRoute.FAVORITES) {
                                                 FavoriteSortAction(
                                                     order = favoriteSortOrder,
+                                                    direction = favoriteSortDirection,
                                                     onOrderSelected = {
                                                         favoriteSortOrder = it
                                                         settingsRepository.setFavoriteSortOrder(it)
+                                                    },
+                                                    onDirectionSelected = {
+                                                        favoriteSortDirection = it
+                                                        settingsRepository.setFavoriteSortDirection(it)
                                                     },
                                                 )
                                             }
@@ -684,6 +747,8 @@ internal fun JmxApp(
                                     repository = accountDataRepository,
                                     sessionRevision = accountSessionRevision,
                                     favoriteOrder = favoriteSortOrder,
+                                    favoriteDirection = favoriteSortDirection,
+                                    updateRecords = albumUpdateRecords,
                                     liftedAlbumId = detailRequest
                                         ?.takeIf {
                                             it.origin == AlbumDetailOrigin.ACCOUNT && it.sourceBounds != null
@@ -757,6 +822,23 @@ internal fun JmxApp(
                                     onTopBarBlurStyleChanged = { topBarBlurStyle = it },
                                     onLiquidGlassNavBarChanged = { liquidGlassNavBar = it },
                                     onFloatingNavBarStyleChanged = { floatingNavBarStyle = it },
+                                    comicUpdateSummary = albumUpdateSummary,
+                                    scanningComicUpdates = scanningAlbumUpdates,
+                                    onScanComicUpdates = {
+                                        coroutineScope.launch {
+                                            albumUpdateCenter.scan(
+                                                includeFavorites = accountProfile != null,
+                                                force = true,
+                                            )
+                                        }
+                                    },
+                                    onSimulateComicUpdates = {
+                                        albumUpdateCenter.simulateUpdates(
+                                            albums = SIMULATED_UPDATE_ALBUMS,
+                                            chapters = SIMULATED_UPDATE_CHAPTERS,
+                                        )
+                                    },
+                                    onClearComicUpdates = albumUpdateCenter::clearAllPending,
                                 )
                                 JmxRoute.MAIN,
                                 JmxRoute.ABOUT,
@@ -809,6 +891,12 @@ internal fun JmxApp(
             }
         }
 
+        // 点开就算"看过"：用户要求不必真的阅读。这里先按已知话数清掉提示，
+        // 详情加载完还会用更准的章节数再对一次账（onChaptersLoaded）。
+        LaunchedEffect(detailRequest?.album?.id) {
+            detailRequest?.album?.id?.let { albumUpdateCenter.markSeen(it) }
+        }
+
         detailRequest?.let { request ->
             Box(
                 modifier = Modifier
@@ -844,6 +932,9 @@ internal fun JmxApp(
                     },
                     onStartReading = { readerRequest = it },
                     onDismiss = { detailRequest = null },
+                    onChaptersLoaded = { albumId, chapterCount ->
+                        albumUpdateCenter.markSeen(albumId, chapterCount)
+                    },
                     topBarBlurStyle = topBarBlurStyle,
                 )
             }

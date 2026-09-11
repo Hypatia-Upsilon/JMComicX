@@ -184,6 +184,7 @@ private fun floatingBarBlurColors(): BlurColors = BlurDefaults.blurColors(
  * @param selectionProgress 分页器的连续位置，例如
  *   `{ pagerState.currentPage + pagerState.currentPageOffsetFraction }`。
  *   传入后指示器实时跟手，手动滑动分页时标签不再滞后于内容。
+ * @param badgedTabs 需要在右上角画红点的标签下标集合。
  */
 @Composable
 fun BlurTabRow(
@@ -192,6 +193,7 @@ fun BlurTabRow(
     onTabSelected: (Int) -> Unit,
     modifier: Modifier = Modifier,
     selectionProgress: (() -> Float)? = null,
+    badgedTabs: Set<Int> = emptySet(),
 ) {
     if (tabs.isEmpty()) return
     JmxTabRow(
@@ -199,6 +201,7 @@ fun BlurTabRow(
         selectedTabIndex = selectedIndex,
         onTabSelected = onTabSelected,
         selectionProgress = selectionProgress,
+        badgedTabs = badgedTabs,
         // 标签下面多留一段模糊余量：渐进模糊与遮罩都在顶栏底边衰减到 0，
         // 留白把这段衰减尾巴挪到标签下方，标签自身仍处在有模糊、有遮罩的区间内。
         modifier = modifier.padding(bottom = 14.dp),

@@ -8,10 +8,23 @@ import kotlin.math.pow
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal enum class BookshelfSortOrder(val label: String) {
-    NAME("名称"),
-    UPDATED("更新时间"),
-    RECENTLY_READ("最近阅读"),
+/**
+ * 书架排序字段。[defaultDirection] 是该字段的习惯方向：名称默认 A→Z，时间类默认最新在前。
+ * 用户没有显式选过方向时沿用它，所以本次新增方向开关不会改变既有排序表现。
+ */
+internal enum class BookshelfSortOrder(
+    val label: String,
+    val defaultDirection: BookshelfSortDirection,
+) {
+    NAME("名称", BookshelfSortDirection.ASCENDING),
+    UPDATED("更新时间", BookshelfSortDirection.DESCENDING),
+    RECENTLY_READ("最近阅读", BookshelfSortDirection.DESCENDING),
+}
+
+/** 排序方向。ASCENDING 由小到大（A→Z、旧→新），DESCENDING 反之。 */
+internal enum class BookshelfSortDirection(val label: String) {
+    ASCENDING("正序"),
+    DESCENDING("倒序"),
 }
 
 internal enum class BookshelfAuthorMatchSource(val label: String) {
@@ -103,11 +116,12 @@ internal class BookshelfRepository(
     fun entries(
         groupId: String = ALL_BOOKSHELF_GROUP_ID,
         order: BookshelfSortOrder = sortOrder(),
+        direction: BookshelfSortDirection = sortDirection(order),
     ): List<BookshelfEntry> = synchronized(lock) {
         val entries = readEntries().let { current ->
             if (groupId == ALL_BOOKSHELF_GROUP_ID) current else current.filter { groupId in it.groupIds }
         }
-        sortBookshelf(entries, order)
+        sortBookshelf(entries, order, direction)
     }
 
     fun entry(albumId: String): BookshelfEntry? = synchronized(lock) {
@@ -329,6 +343,22 @@ internal class BookshelfRepository(
     }
 
     /**
+     * 排序方向按字段分别记住，而不是一个全局开关。
+     *
+     * 理由是"倒序"在不同字段下含义完全不同（名称 Z→A 和更新时间最新在前），
+     * 共用一个开关会让切字段时方向莫名其妙地翻过来。没存过就用字段自己的习惯方向。
+     */
+    fun sortDirection(order: BookshelfSortOrder = sortOrder()): BookshelfSortDirection {
+        val stored = preferences.getString(bookshelfSortDirectionKey(order), null)
+        return BookshelfSortDirection.entries.firstOrNull { it.name == stored }
+            ?: order.defaultDirection
+    }
+
+    fun setSortDirection(order: BookshelfSortOrder, direction: BookshelfSortDirection) {
+        preferences.edit { putString(bookshelfSortDirectionKey(order), direction.name) }
+    }
+
+    /**
      * 取一份可导出的书架快照。
      *
      * [groupIds] 传 null 表示"全部"，此时 [includeGroups] 决定要不要带上分组定义；
@@ -407,22 +437,35 @@ internal class BookshelfRepository(
     }
 }
 
+/** 方向按字段分开存，key 里带上字段名。 */
+private fun bookshelfSortDirectionKey(order: BookshelfSortOrder): String =
+    BOOKSHELF_SORT_DIRECTION_KEY_PREFIX + order.name
+
+/**
+ * 先按字段构造"由小到大"的比较器，再按方向决定是否整体反转。
+ * 反转后的结果与改动前的降序比较器逐项等价（含次级排序键），所以默认方向下排序表现不变。
+ */
 internal fun sortBookshelf(
     entries: List<BookshelfEntry>,
     order: BookshelfSortOrder,
-): List<BookshelfEntry> = when (order) {
-    BookshelfSortOrder.NAME -> entries.sortedWith(
-        compareBy<BookshelfEntry> { it.name.lowercase(Locale.ROOT) }
-            .thenBy(BookshelfEntry::albumId),
-    )
-    BookshelfSortOrder.UPDATED -> entries.sortedWith(
-        compareByDescending<BookshelfEntry>(BookshelfEntry::updatedAt)
-            .thenByDescending(BookshelfEntry::addedAt),
-    )
-    BookshelfSortOrder.RECENTLY_READ -> entries.sortedWith(
-        compareByDescending<BookshelfEntry> { it.lastReadAt ?: Long.MIN_VALUE }
-            .thenByDescending(BookshelfEntry::updatedAt),
-    )
+    direction: BookshelfSortDirection = order.defaultDirection,
+): List<BookshelfEntry> {
+    val ascending: Comparator<BookshelfEntry> = when (order) {
+        BookshelfSortOrder.NAME ->
+            compareBy<BookshelfEntry> { it.name.lowercase(Locale.ROOT) }
+                .thenBy(BookshelfEntry::albumId)
+        BookshelfSortOrder.UPDATED ->
+            compareBy<BookshelfEntry>(BookshelfEntry::updatedAt)
+                .thenBy(BookshelfEntry::addedAt)
+        BookshelfSortOrder.RECENTLY_READ ->
+            compareBy<BookshelfEntry> { it.lastReadAt ?: Long.MIN_VALUE }
+                .thenBy(BookshelfEntry::updatedAt)
+    }
+    val comparator = when (direction) {
+        BookshelfSortDirection.ASCENDING -> ascending
+        BookshelfSortDirection.DESCENDING -> ascending.reversed()
+    }
+    return entries.sortedWith(comparator)
 }
 
 internal fun addToBookshelf(
@@ -893,6 +936,7 @@ private const val BOOKSHELF_PREFERENCES = "jmx_bookshelf"
 private const val BOOKSHELF_ENTRIES_KEY = "entries"
 private const val BOOKSHELF_GROUPS_KEY = "groups"
 private const val BOOKSHELF_SORT_KEY = "sort_order"
+private const val BOOKSHELF_SORT_DIRECTION_KEY_PREFIX = "sort_direction_"
 private const val BOOKSHELF_GROUP_ORDER_KEY = "group_order"
 private const val BOOKSHELF_GROUP_USAGE_KEY = "group_usage"
 private const val BOOKSHELF_GROUP_AUTO_ORDER_KEY = "group_auto_order"

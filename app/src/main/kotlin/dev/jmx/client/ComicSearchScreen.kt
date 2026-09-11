@@ -61,6 +61,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalFocusManager
@@ -83,6 +84,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.basic.Badge
+import top.yukonga.miuix.kmp.basic.BadgedBox
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -408,18 +411,27 @@ internal fun ComicSearchScreen(
                 label = "SearchEndAction",
             ) { editing ->
                 if (editing) {
-                    Text(
-                        text = "取消",
-                        color = MiuixTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .clickable(onClick = ::cancelInputMode)
-                            .padding(start = 4.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
-                    )
+                    // 输入态也保留标签过滤入口：可以先挑标签再敲关键词，甚至只用标签搜索。
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (SEARCH_TAG_FILTER_UI_ENABLED) {
+                            SearchTagFilterButton(
+                                activeCount = tagFilter.activeCount,
+                                onClick = { showTagFilter = true },
+                            )
+                        }
+                        Text(
+                            text = "取消",
+                            color = MiuixTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clickable(onClick = ::cancelInputMode)
+                                .padding(start = 4.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                        )
+                    }
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (SEARCH_TAG_FILTER_UI_ENABLED) {
                             SearchTagFilterButton(
-                                active = tagFilter.enabled,
+                                activeCount = tagFilter.activeCount,
                                 onClick = { showTagFilter = true },
                             )
                         }
@@ -516,31 +528,46 @@ internal fun ComicSearchScreen(
 
 private const val SEARCH_TAG_FILTER_UI_ENABLED = true
 
+/**
+ * 标签过滤入口。
+ *
+ * 未启用时用与其他顶栏图标一致的中性色，不再显示蓝色，避免"看起来已经开着"的误导；
+ * 启用后图标转为主题色，并叠加一个数字角标显示生效的标签数量，状态一眼可见。
+ */
 @Composable
 private fun SearchTagFilterButton(
-    active: Boolean,
+    activeCount: Int,
     onClick: () -> Unit,
 ) {
+    val active = activeCount > 0
     IconButton(
         onClick = onClick,
         minWidth = 42.dp,
         minHeight = 42.dp,
-        backgroundColor = if (active) {
-            MiuixTheme.colorScheme.primaryContainer
-        } else {
-            Color.Transparent
-        },
     ) {
-        Icon(
-            imageVector = MiuixIcons.Filter,
-            contentDescription = if (active) "标签过滤已启用" else "标签过滤",
-            modifier = Modifier.size(20.dp),
-            tint = if (active) {
-                MiuixTheme.colorScheme.onPrimaryContainer
-            } else {
-                MiuixTheme.colorScheme.primary
+        BadgedBox(
+            badge = {
+                if (active) {
+                    Badge(
+                        containerColor = MiuixTheme.colorScheme.primary,
+                        contentColor = MiuixTheme.colorScheme.onPrimary,
+                    ) {
+                        Text(text = activeCount.toString())
+                    }
+                }
             },
-        )
+        ) {
+            Icon(
+                imageVector = MiuixIcons.Filter,
+                contentDescription = if (active) "标签过滤已启用，$activeCount 个标签" else "标签过滤",
+                modifier = Modifier.size(20.dp),
+                tint = if (active) {
+                    MiuixTheme.colorScheme.primary
+                } else {
+                    MiuixTheme.colorScheme.onSurfaceVariantActions
+                },
+            )
+        }
     }
 }
 
@@ -606,22 +633,43 @@ private fun SearchTagFilterDialog(
         },
         onDismissRequest = onDismiss,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TagFilterLegend(
-                symbol = "＋",
-                label = "包含",
-                container = MiuixTheme.colorScheme.primaryContainer,
-                onContainer = MiuixTheme.colorScheme.onPrimaryContainer,
+        // 已选条件常驻显示：状态不藏在点击循环里，点一下即可直接移除该条件。
+        if (working.enabled) {
+            Text(
+                text = "已选条件（点按移除）",
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
-            TagFilterLegend(
-                symbol = "－",
-                label = "排除",
-                container = MiuixTheme.colorScheme.errorContainer,
-                onContainer = MiuixTheme.colorScheme.onErrorContainer,
+            Spacer(modifier = Modifier.height(8.dp))
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                working.normalizedIncludeTags.forEach { tag ->
+                    SearchTagChip(
+                        label = "＋$tag",
+                        container = MiuixTheme.colorScheme.primaryContainer,
+                        onContainer = MiuixTheme.colorScheme.onPrimaryContainer,
+                        shape = chipShape,
+                        onClick = { working = working.toggleInclude(tag) },
+                    )
+                }
+                working.normalizedExcludeTags.forEach { tag ->
+                    SearchTagChip(
+                        label = "－$tag",
+                        container = MiuixTheme.colorScheme.errorContainer,
+                        onContainer = MiuixTheme.colorScheme.onErrorContainer,
+                        shape = chipShape,
+                        onClick = { working = working.toggleExclude(tag) },
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "尚未添加条件。＋ 表示结果必须包含，－ 表示结果必须排除。",
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
         }
         Spacer(modifier = Modifier.height(14.dp))
@@ -646,7 +694,7 @@ private fun SearchTagFilterDialog(
         }
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "点按循环切换，长按可删除自定义标签",
+            text = "可选标签：点按依次切换 ＋包含 / －排除 / 取消，长按删除自定义标签",
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
@@ -654,7 +702,7 @@ private fun SearchTagFilterDialog(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 280.dp)
+                .heightIn(max = 260.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
             FlowRow(
@@ -663,43 +711,30 @@ private fun SearchTagFilterDialog(
             ) {
                 tagOptions.forEach { tag ->
                     val tagState = working.stateOf(tag)
-                    val container = when (tagState) {
-                        SearchTagState.INCLUDE -> MiuixTheme.colorScheme.primaryContainer
-                        SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.errorContainer
-                        SearchTagState.NONE -> MiuixTheme.colorScheme.surfaceContainerHigh
-                    }
-                    val onContainer = when (tagState) {
-                        SearchTagState.INCLUDE -> MiuixTheme.colorScheme.onPrimaryContainer
-                        SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.onErrorContainer
-                        SearchTagState.NONE -> MiuixTheme.colorScheme.onSurface
-                    }
-                    val label = when (tagState) {
-                        SearchTagState.INCLUDE -> "＋$tag"
-                        SearchTagState.EXCLUDE -> "－$tag"
-                        SearchTagState.NONE -> tag
-                    }
-                    val onLongClick: (() -> Unit)? = if (tag in userTagSet) {
-                        { deleteUserTag(tag) }
-                    } else {
-                        null
-                    }
-                    Surface(shape = chipShape, color = container) {
-                        Box(
-                            modifier = Modifier
-                                .clip(chipShape)
-                                .combinedClickable(
-                                    onClick = { cycle(tag) },
-                                    onLongClick = onLongClick,
-                                )
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
-                        ) {
-                            Text(
-                                text = label,
-                                style = MiuixTheme.textStyles.footnote1,
-                                color = onContainer,
-                            )
-                        }
-                    }
+                    SearchTagChip(
+                        label = when (tagState) {
+                            SearchTagState.INCLUDE -> "＋$tag"
+                            SearchTagState.EXCLUDE -> "－$tag"
+                            SearchTagState.NONE -> tag
+                        },
+                        container = when (tagState) {
+                            SearchTagState.INCLUDE -> MiuixTheme.colorScheme.primaryContainer
+                            SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.errorContainer
+                            SearchTagState.NONE -> MiuixTheme.colorScheme.surfaceContainerHigh
+                        },
+                        onContainer = when (tagState) {
+                            SearchTagState.INCLUDE -> MiuixTheme.colorScheme.onPrimaryContainer
+                            SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.onErrorContainer
+                            SearchTagState.NONE -> MiuixTheme.colorScheme.onSurface
+                        },
+                        shape = chipShape,
+                        onClick = { cycle(tag) },
+                        onLongClick = if (tag in userTagSet) {
+                            { deleteUserTag(tag) }
+                        } else {
+                            null
+                        },
+                    )
                 }
             }
         }
@@ -724,29 +759,27 @@ private fun SearchTagFilterDialog(
 }
 
 @Composable
-private fun TagFilterLegend(
-    symbol: String,
+private fun SearchTagChip(
     label: String,
     container: Color,
     onContainer: Color,
+    shape: Shape,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Surface(shape = RoundedCornerShape(6.dp), color = container) {
+    Surface(shape = shape, color = container) {
+        Box(
+            modifier = Modifier
+                .clip(shape)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+        ) {
             Text(
-                text = symbol,
-                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                text = label,
                 style = MiuixTheme.textStyles.footnote1,
                 color = onContainer,
             )
         }
-        Text(
-            text = label,
-            style = MiuixTheme.textStyles.footnote1,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        )
     }
 }
 

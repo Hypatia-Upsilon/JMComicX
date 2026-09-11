@@ -102,6 +102,15 @@ internal class AppSettingsRepository(
         preferences.edit { putString(FAVORITE_SORT_ORDER_KEY, order.name) }
     }
 
+    /** 收藏页排序方向，默认倒序（最新在前，与服务端原始顺序一致） */
+    fun favoriteSortDirection(): FavoriteSortDirection = FavoriteSortDirection.fromName(
+        preferences.getString(FAVORITE_SORT_DIRECTION_KEY, null)
+    )
+
+    fun setFavoriteSortDirection(direction: FavoriteSortDirection) {
+        preferences.edit { putString(FAVORITE_SORT_DIRECTION_KEY, direction.name) }
+    }
+
     fun setAutoCheckInEnabled(enabled: Boolean) {
         preferences.edit { putBoolean(AUTO_CHECK_IN_KEY, enabled) }
     }
@@ -207,4 +216,5 @@ private const val TOP_BAR_BLUR_STYLE_KEY = "top_bar_blur_style"
 private const val LIQUID_GLASS_NAV_BAR_KEY = "liquid_glass_nav_bar"
 private const val FLOATING_NAV_BAR_STYLE_KEY = "floating_nav_bar_style"
 private const val FAVORITE_SORT_ORDER_KEY = "favorite_sort_order"
+private const val FAVORITE_SORT_DIRECTION_KEY = "favorite_sort_direction"
 private const val IMAGE_PROBE_TIMEOUT_SECONDS = 5L

@@ -117,6 +117,59 @@ class BookshelfRepositoryTest {
     }
 
     @Test
+    fun omittingDirectionKeepsEachFieldsHabitualOrder() {
+        val entries = listOf(
+            BookshelfEntry("1", "alpha", "", "", "", addedAt = 10L, updatedAt = 10L, lastReadAt = 100L),
+            BookshelfEntry("2", "Beta", "", "", "", addedAt = 20L, updatedAt = 20L, lastReadAt = 50L),
+        )
+
+        // 不传方向时必须与改动前逐项一致：名称 A→Z，时间类最新在前。
+        BookshelfSortOrder.entries.forEach { order ->
+            assertEquals(
+                "默认方向应等于 ${order.name} 的 defaultDirection",
+                sortBookshelf(entries, order).map { it.albumId },
+                sortBookshelf(entries, order, order.defaultDirection).map { it.albumId },
+            )
+        }
+        assertEquals(listOf("1", "2"), sortBookshelf(entries, BookshelfSortOrder.NAME).map { it.albumId })
+        assertEquals(listOf("2", "1"), sortBookshelf(entries, BookshelfSortOrder.UPDATED).map { it.albumId })
+        assertEquals(
+            listOf("1", "2"),
+            sortBookshelf(entries, BookshelfSortOrder.RECENTLY_READ).map { it.albumId },
+        )
+    }
+
+    @Test
+    fun reversingDirectionReversesEveryField() {
+        val entries = listOf(
+            BookshelfEntry("1", "alpha", "", "", "", addedAt = 10L, updatedAt = 10L, lastReadAt = 100L),
+            BookshelfEntry("2", "Beta", "", "", "", addedAt = 20L, updatedAt = 20L, lastReadAt = 50L),
+            BookshelfEntry("3", "gamma", "", "", "", addedAt = 30L, updatedAt = 30L, lastReadAt = null),
+        )
+
+        BookshelfSortOrder.entries.forEach { order ->
+            val ascending = sortBookshelf(entries, order, BookshelfSortDirection.ASCENDING).map { it.albumId }
+            val descending = sortBookshelf(entries, order, BookshelfSortDirection.DESCENDING).map { it.albumId }
+            assertEquals("${order.name} 的两个方向应互为逆序", ascending.reversed(), descending)
+        }
+    }
+
+    @Test
+    fun ascendingRecentlyReadPutsNeverReadEntriesFirst() {
+        val entries = listOf(
+            BookshelfEntry("read", "alpha", "", "", "", addedAt = 10L, updatedAt = 10L, lastReadAt = 100L),
+            BookshelfEntry("fresh", "Beta", "", "", "", addedAt = 20L, updatedAt = 20L, lastReadAt = null),
+        )
+
+        // 没读过按 Long.MIN_VALUE 处理：正序时排在最前，而不是被当成"刚读过"。
+        assertEquals(
+            listOf("fresh", "read"),
+            sortBookshelf(entries, BookshelfSortOrder.RECENTLY_READ, BookshelfSortDirection.ASCENDING)
+                .map { it.albumId },
+        )
+    }
+
+    @Test
     fun tagRulesRequireEveryRuleAndAcceptCommonDelimiters() {
         val rules = parseBookshelfTagRules("韩漫，全彩  连载中")
 

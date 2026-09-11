@@ -19,6 +19,9 @@ internal data class SearchTagFilter(
 ) {
     val enabled: Boolean get() = includeTags.isNotEmpty() || excludeTags.isNotEmpty()
 
+    /** 生效的标签总数，用于入口按钮上的数字角标。 */
+    val activeCount: Int get() = normalizedIncludeTags.size + normalizedExcludeTags.size
+
     val normalizedIncludeTags: List<String>
         get() = includeTags.mapNotNull(::normalizeSearchTag).distinct()
 
