@@ -58,12 +58,22 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // 设置页里的"漫画更新提示"自测入口（立即检查 / 模拟一次 / 清除全部）只在调试构建出现；
+            // release 为编译期常量 false，整块被折叠掉，正式包不含这几个按钮。功能本身照常发布。
+            buildConfigField("boolean", "COMIC_UPDATE_HINTS", "false")
+        }
+        getByName("debug") {
+            buildConfigField("boolean", "COMIC_UPDATE_HINTS", "true")
         }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 }
 

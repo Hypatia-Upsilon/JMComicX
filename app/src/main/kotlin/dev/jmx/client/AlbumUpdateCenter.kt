@@ -10,6 +10,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
+ * 是否显示设置页里的「漫画更新提示」测试区块（立即检查 / 模拟一次 / 清除全部）。
+ *
+ * 这三个入口只为本地自测而设，正式发布的设置页不出现：debug 为 true，release 编译期为 false
+ * （见 `app/build.gradle.kts` 的 `COMIC_UPDATE_HINTS`）。注意它只控制"测试入口的显隐"，
+ * 更新提示功能本身在正式版里照常工作。
+ *
+ * 声明为 `const val` 而非普通 `val`：只有编译期常量才能让引用处的 `if` 被常量折叠，
+ * 使 release 包里连这几个测试按钮的字串都不残留；运行时分支做不到这一点。
+ */
+internal const val SHOW_COMIC_UPDATE_TEST_ENTRIES: Boolean = BuildConfig.COMIC_UPDATE_HINTS
+
+/**
  * 更新提示的单一数据源。
  *
  * "我的"页的角标、收藏页的"更新 N 章"、书架分组栏的红点读的都是同一份 [records]，

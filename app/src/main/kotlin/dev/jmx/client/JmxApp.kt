@@ -663,6 +663,7 @@ internal fun JmxApp(
                                             onDaily = { openProtectedAccountPage(JmxRoute.DAILY) },
                                             onAbout = { navigateAccount(JmxRoute.ABOUT) },
                                             // 只数收藏里的更新：仅在书架、没被收藏的漫画不该让收藏冒红点。
+                                            // release 下 albumUpdateRecords 恒为空，角标自然不显示。
                                             favoriteUpdateCount = albumUpdateRecords
                                                 .let { countPendingFavorites(it, albumFavoriteIds) },
                                         )
