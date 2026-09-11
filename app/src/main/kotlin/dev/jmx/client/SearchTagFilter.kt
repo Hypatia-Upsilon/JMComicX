@@ -6,32 +6,71 @@ import com.github.houbb.opencc4j.util.ZhConverterUtil
 import java.text.Normalizer
 import java.util.Locale
 
-internal enum class SearchTagFilterMode {
-    INCLUDE,
-    EXCLUDE,
-}
-
+/**
+ * 搜索标签过滤条件。
+ *
+ * JM 服务端原生支持标签级的包含（`+标签`）与排除（`-标签`）语法，且同一次查询可以同时
+ * 包含与排除多个标签，因此这里用两个集合表达，而不是旧版的单一 INCLUDE/EXCLUDE 模式。
+ * 过滤在服务端一次性完成，客户端不再逐条拉取详情做匹配。
+ */
 internal data class SearchTagFilter(
-    val mode: SearchTagFilterMode = SearchTagFilterMode.INCLUDE,
-    val tags: List<String> = emptyList(),
+    val includeTags: List<String> = emptyList(),
+    val excludeTags: List<String> = emptyList(),
 ) {
-    val enabled: Boolean get() = tags.isNotEmpty()
+    val enabled: Boolean get() = includeTags.isNotEmpty() || excludeTags.isNotEmpty()
 
-    val normalizedTags: List<String>
-        get() = tags.mapNotNull(::normalizeSearchTag).distinct()
+    /** 生效的标签总数，用于入口按钮上的数字角标。 */
+    val activeCount: Int get() = normalizedIncludeTags.size + normalizedExcludeTags.size
 
-    fun matches(albumTags: List<String>): Boolean {
-        val wanted = normalizedTags
-        if (wanted.isEmpty()) return true
-        val available = albumTags.mapNotNull(::normalizeSearchTag).distinct()
-        val matches = wanted.map { target ->
-            available.any { tag -> tag == target || tag.contains(target) || target.contains(tag) }
-        }
-        return when (mode) {
-            SearchTagFilterMode.INCLUDE -> matches.all { it }
-            SearchTagFilterMode.EXCLUDE -> matches.none { it }
+    val normalizedIncludeTags: List<String>
+        get() = includeTags.mapNotNull(::normalizeSearchTag).distinct()
+
+    val normalizedExcludeTags: List<String>
+        get() = excludeTags.mapNotNull(::normalizeSearchTag).distinct()
+        .filterNot { it in normalizedIncludeTags }
+
+    fun toggleInclude(tag: String): SearchTagFilter {
+        val normalized = normalizeSearchTag(tag) ?: return this
+        return if (normalized in normalizedIncludeTags) {
+            copy(includeTags = includeTags.filter { normalizeSearchTag(it) != normalized })
+        } else {
+            copy(
+                includeTags = includeTags + normalized,
+                excludeTags = excludeTags.filter { normalizeSearchTag(it) != normalized },
+            )
         }
     }
+
+    fun toggleExclude(tag: String): SearchTagFilter {
+        val normalized = normalizeSearchTag(tag) ?: return this
+        return if (normalized in normalizedExcludeTags) {
+            copy(excludeTags = excludeTags.filter { normalizeSearchTag(it) != normalized })
+        } else {
+            copy(
+                excludeTags = excludeTags + normalized,
+                includeTags = includeTags.filter { normalizeSearchTag(it) != normalized },
+            )
+        }
+    }
+
+    fun stateOf(tag: String): SearchTagState {
+        val normalized = normalizeSearchTag(tag) ?: return SearchTagState.NONE
+        return when (normalized) {
+            in normalizedIncludeTags -> SearchTagState.INCLUDE
+            in normalizedExcludeTags -> SearchTagState.EXCLUDE
+            else -> SearchTagState.NONE
+        }
+    }
+
+    companion object {
+        val EMPTY = SearchTagFilter()
+    }
+}
+
+internal enum class SearchTagState {
+    NONE,
+    INCLUDE,
+    EXCLUDE,
 }
 
 internal val DEFAULT_SEARCH_TAGS = listOf(

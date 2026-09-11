@@ -24,6 +24,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import coil3.compose.SubcomposeAsyncImage
 import coil3.compose.SubcomposeAsyncImageContent
+import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -74,6 +77,7 @@ internal fun AccountScreen(
     onHistory: () -> Unit,
     onDaily: () -> Unit,
     onAbout: () -> Unit,
+    favoriteUpdateCount: Int = 0,
 ) {
     val avatarUrl = remember(profile?.avatar, imageHost) {
         resolveUserAvatarUrl(imageHost, profile?.avatar)
@@ -186,6 +190,13 @@ internal fun AccountScreen(
                     ArrowPreference(
                         title = "漫画收藏",
                         startAction = { AccountPreferenceIcon(MiuixIcons.Favorites, "漫画收藏") },
+                        endActions = {
+                            // 有更新才出现：红点 + 部数。数字说的是"几部漫画有更新"，
+                            // 具体更新了几话在收藏页每部漫画的封面上单独标。
+                            if (favoriteUpdateCount > 0) {
+                                FavoriteUpdateBadge(count = favoriteUpdateCount)
+                            }
+                        },
                         onClick = onFavorites,
                     )
                     ArrowPreference(
@@ -233,6 +244,23 @@ private fun AccountPreferenceIcon(imageVector: ImageVector, contentDescription: 
             .size(26.dp),
         tint = MiuixTheme.colorScheme.onSurface,
     )
+}
+
+/**
+ * 漫画收藏行右侧的更新角标：红底数字，表示有几部漫画更新了。
+ *
+ * 用 [Badge] 的带内容形态（16dp）而不是自绘圆点——MIUIX 已经把配色、字号、垂直居中都定死了，
+ * 另起一套只会在深浅色主题之间各偏一点。
+ */
+@Composable
+private fun FavoriteUpdateBadge(count: Int) {
+    Badge(
+        modifier = Modifier.semantics {
+            contentDescription = "$count 部漫画有更新"
+        },
+    ) {
+        Text(text = if (count > 99) "99+" else count.toString())
+    }
 }
 
 @Composable

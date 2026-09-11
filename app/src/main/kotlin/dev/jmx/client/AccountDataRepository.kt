@@ -33,6 +33,54 @@ internal enum class FavoriteSortOrder(val apiOrder: String, val label: String) {
     }
 }
 
+/**
+ * 收藏页排序方向。
+ *
+ * 「正序」= 服务端原生顺序（收藏接口固定返回最新在前）；「倒序」= 整体翻转，
+ * 把服务端的最后一页当第一页取、页内顺序反过来。默认 [ASCENDING]，与改动前表现一致。
+ */
+internal enum class FavoriteSortDirection(val label: String) {
+    ASCENDING("正序"),
+    DESCENDING("倒序"),
+    ;
+
+    companion object {
+        val Default = ASCENDING
+
+        fun fromName(name: String?): FavoriteSortDirection =
+            entries.firstOrNull { it.name == name } ?: Default
+    }
+}
+
+/** 服务端总页数：`total` 未知时返回 null，调用方要先探一页才能算出来。 */
+internal fun favoriteServerPageCount(total: Int?): Int? {
+    if (total == null || total <= 0) return null
+    val size = JmxMagicConstants.PAGE_SIZE_FAVORITE
+    return (total + size - 1) / size
+}
+
+/**
+ * 逻辑页号 → 服务端页号。
+ *
+ * 正序时两者相同（服务端原生顺序就是最新在前）。倒序时逻辑第 1 页对应服务端最后一页，
+ * 依次往前；越过第 1 页说明已经翻到头，返回 null 让调用方收尾而不是重复请求第 1 页。
+ */
+internal fun favoriteServerPage(
+    logicalPage: Int,
+    direction: FavoriteSortDirection,
+    serverPageCount: Int?,
+): Int? = when (direction) {
+    FavoriteSortDirection.ASCENDING -> logicalPage
+    FavoriteSortDirection.DESCENDING -> {
+        if (serverPageCount == null) {
+            // 还不知道总页数，只能先探服务端第一页把 total 拿回来。
+            1
+        } else {
+            (serverPageCount - logicalPage + 1).takeIf { it >= 1 }
+        }
+    }
+}
+
 internal data class AccountAlbumPage(
     val albums: List<HomeAlbum>,
     val total: Int?,

@@ -28,19 +28,17 @@ import androidx.compose.ui.unit.dp
 import dev.jmx.client.core.result.JmxResult
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
-import top.yukonga.miuix.kmp.basic.DropdownImpl
+import top.yukonga.miuix.kmp.basic.DropdownEntry
+import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.ListPopupColumn
-import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Sort
+import top.yukonga.miuix.kmp.menu.WindowIconCascadingDropdownMenu
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowListPopup
 
 @Composable
 internal fun AccountCollectionScreen(
@@ -53,22 +51,32 @@ internal fun AccountCollectionScreen(
     onRequireLogin: () -> Unit,
     backdrop: LayerBackdrop? = null,
     favoriteOrder: FavoriteSortOrder = FavoriteSortOrder.Default,
+    favoriteDirection: FavoriteSortDirection = FavoriteSortDirection.Default,
+    updateRecords: Map<String, AlbumUpdateRecord> = emptyMap(),
 ) {
     // 换排序等于换一份列表：连 retryKey 一起重置，让页面立刻回到加载态而不是把旧顺序留在屏上。
-    var state by remember(kind, favoriteOrder) {
+    var state by remember(kind, favoriteOrder, favoriteDirection) {
         mutableStateOf<AccountCollectionState>(AccountCollectionState.Loading)
     }
-    var retryKey by remember(kind, favoriteOrder) { mutableIntStateOf(0) }
+    var retryKey by remember(kind, favoriteOrder, favoriteDirection) { mutableIntStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(kind, favoriteOrder, retryKey, sessionRevision, repository) {
-        state = when (val result = repository.loadCollection(kind, page = 1, favoriteOrder = favoriteOrder)) {
+    LaunchedEffect(kind, favoriteOrder, favoriteDirection, retryKey, sessionRevision, repository) {
+        val result = repository.loadFavoriteLogicalPage(
+            kind = kind,
+            logicalPage = 1,
+            favoriteOrder = favoriteOrder,
+            direction = favoriteDirection,
+            knownServerPageCount = null,
+        )
+        state = when (result) {
             is JmxResult.Success -> {
                 val total = result.value.total
                 AccountCollectionState.Content(
                     albums = result.value.albums,
                     total = total,
                     nextPage = 2,
+                    serverPageCount = result.value.serverPageCount,
                     endReached = result.value.albums.isEmpty() ||
                         (total != null && result.value.albums.size >= total),
                 )
@@ -91,7 +99,13 @@ internal fun AccountCollectionScreen(
         if (content.loadingMore || content.endReached) return
         state = content.copy(loadingMore = true, loadMoreError = null)
         coroutineScope.launch {
-            val result = repository.loadCollection(kind, content.nextPage, favoriteOrder)
+            val result = repository.loadFavoriteLogicalPage(
+                kind = kind,
+                logicalPage = content.nextPage,
+                favoriteOrder = favoriteOrder,
+                direction = favoriteDirection,
+                knownServerPageCount = content.serverPageCount,
+            )
             val latest = state as? AccountCollectionState.Content ?: return@launch
             state = when (result) {
                 is JmxResult.Success -> {
@@ -103,6 +117,7 @@ internal fun AccountCollectionScreen(
                         albums = merged,
                         total = total ?: latest.total,
                         nextPage = latest.nextPage + 1,
+                        serverPageCount = result.value.serverPageCount ?: latest.serverPageCount,
                         loadingMore = false,
                         endReached = incoming.isEmpty() ||
                             (total != null && merged.size >= total),
@@ -146,6 +161,14 @@ internal fun AccountCollectionScreen(
                     liftedAlbumId = liftedAlbumId,
                     onAlbumSelected = onAlbumSelected,
                     onLoadMore = ::loadMore,
+                    updateChaptersOf = { albumId ->
+                        // 只有收藏页需要"更新 N 章"：观看历史不是订阅关系，标更新没有意义。
+                        if (kind == AccountCollectionKind.FAVORITES) {
+                            updateRecords[albumId]?.pendingChapters ?: 0
+                        } else {
+                            0
+                        }
+                    },
                 )
             }
         }
@@ -153,47 +176,50 @@ internal fun AccountCollectionScreen(
 }
 
 /**
- * 收藏页顶栏右上角的排序下拉菜单。
+ * 收藏页顶栏右上角的排序菜单。
  *
- * 排序由服务端完成（`o` 参数），所以选完必须重新拉第一页——收藏摘要里没有任何时间字段，
- * 本地排不出来。
+ * 排序字段由服务端完成（`o` 参数），所以选完必须重新拉第一页——收藏摘要里没有任何时间字段，
+ * 本地排不出来。方向做成二级子菜单：MIUIX 级联菜单最深两级，正好够"字段 + 方向"。
  */
 @Composable
 internal fun FavoriteSortAction(
     order: FavoriteSortOrder,
+    direction: FavoriteSortDirection,
     onOrderSelected: (FavoriteSortOrder) -> Unit,
+    onDirectionSelected: (FavoriteSortDirection) -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val options = FavoriteSortOrder.entries
-    // 弹窗要用锚点（父布局）的位置定位，所以必须和 IconButton 同处一个 Box。
-    Box {
-        IconButton(onClick = { expanded = true }) {
-            Icon(
-                imageVector = MiuixIcons.Sort,
-                contentDescription = "排序方式：${order.label}",
-                tint = MiuixTheme.colorScheme.onBackground,
-            )
-        }
-        WindowListPopup(
-            show = expanded,
-            alignment = PopupPositionProvider.Align.End,
-            onDismissRequest = { expanded = false },
-        ) {
-            ListPopupColumn {
-                options.forEachIndexed { index, option ->
-                    DropdownImpl(
+    val entry = DropdownEntry(
+        items = buildList {
+            FavoriteSortOrder.entries.forEach { option ->
+                add(
+                    DropdownItem(
                         text = option.label,
-                        optionSize = options.size,
-                        isSelected = option == order,
-                        index = index,
-                        onSelectedIndexChange = { selectedIndex ->
-                            expanded = false
-                            options.getOrNull(selectedIndex)?.let(onOrderSelected)
-                        },
-                    )
-                }
+                        selected = option == order,
+                        onClick = { onOrderSelected(option) },
+                    ),
+                )
             }
-        }
+            add(
+                DropdownItem(
+                    text = "排序方向",
+                    summary = direction.label,
+                    children = FavoriteSortDirection.entries.map { option ->
+                        DropdownItem(
+                            text = option.label,
+                            selected = option == direction,
+                            onClick = { onDirectionSelected(option) },
+                        )
+                    },
+                ),
+            )
+        },
+    )
+    WindowIconCascadingDropdownMenu(entry = entry) {
+        Icon(
+            imageVector = MiuixIcons.Sort,
+            contentDescription = "排序：${order.label} · ${direction.label}",
+            tint = MiuixTheme.colorScheme.onBackground,
+        )
     }
 }
 
@@ -204,6 +230,7 @@ private fun AccountCollectionGrid(
     liftedAlbumId: String?,
     onAlbumSelected: (HomeAlbum, Rect) -> Unit,
     onLoadMore: () -> Unit,
+    updateChaptersOf: (String) -> Int,
 ) {
     val gridState = rememberLazyGridState()
     val footerVisible by remember(gridState) {
@@ -232,6 +259,7 @@ private fun AccountCollectionGrid(
                 album = album,
                 coverLifted = album.id == liftedAlbumId,
                 onSelected = onAlbumSelected,
+                updateChapters = updateChaptersOf(album.id),
             )
         }
         item(key = ACCOUNT_COLLECTION_FOOTER, span = { GridItemSpan(maxLineSpan) }) {
@@ -295,10 +323,79 @@ private sealed interface AccountCollectionState {
         val albums: List<HomeAlbum>,
         val total: Int?,
         val nextPage: Int,
+        /** 服务端总页数，正序翻页要用它把逻辑页号映射回服务端页号；未知时为 null。 */
+        val serverPageCount: Int? = null,
         val loadingMore: Boolean = false,
         val loadMoreError: String? = null,
         val endReached: Boolean = false,
     ) : AccountCollectionState
+}
+
+/** 一"逻辑页"，也就是按当前方向摆好之后要追加到列表尾部的那一段。 */
+private data class FavoriteLogicalPage(
+    val albums: List<HomeAlbum>,
+    val total: Int?,
+    val serverPageCount: Int?,
+)
+
+/**
+ * 按方向取一页。
+ *
+ * 正序（以及观看历史）就是服务端原始顺序——收藏接口固定最新在前，正序要的正是它，直接照搬。
+ * 倒序才需要把分页整体翻过来：逻辑第 1 页取服务端最后一页并反转页内顺序。第一次进倒序时
+ * 总页数还不知道，先探服务端第一页把 `total` 拿回来——刚好只有一页时这一页反转后就是答案，
+ * 不用再发第二次请求。
+ */
+private suspend fun AccountDataRepository.loadFavoriteLogicalPage(
+    kind: AccountCollectionKind,
+    logicalPage: Int,
+    favoriteOrder: FavoriteSortOrder,
+    direction: FavoriteSortDirection,
+    knownServerPageCount: Int?,
+): JmxResult<FavoriteLogicalPage> {
+    if (kind != AccountCollectionKind.FAVORITES || direction == FavoriteSortDirection.ASCENDING) {
+        return when (val result = loadCollection(kind, logicalPage, favoriteOrder)) {
+            is JmxResult.Success -> JmxResult.Success(
+                FavoriteLogicalPage(
+                    albums = result.value.albums,
+                    total = result.value.total,
+                    serverPageCount = favoriteServerPageCount(result.value.total),
+                ),
+            )
+            is JmxResult.Failure -> result
+        }
+    }
+    var pageCount = knownServerPageCount
+    if (pageCount == null) {
+        val probe = when (val result = loadCollection(kind, page = 1, favoriteOrder = favoriteOrder)) {
+            is JmxResult.Success -> result.value
+            is JmxResult.Failure -> return result
+        }
+        pageCount = favoriteServerPageCount(probe.total)
+        if (pageCount == null || pageCount <= 1) {
+            return JmxResult.Success(
+                FavoriteLogicalPage(
+                    albums = probe.albums.reversed(),
+                    total = probe.total,
+                    serverPageCount = pageCount ?: 1,
+                ),
+            )
+        }
+    }
+    val serverPage = favoriteServerPage(logicalPage, direction, pageCount)
+        ?: return JmxResult.Success(
+            FavoriteLogicalPage(albums = emptyList(), total = null, serverPageCount = pageCount),
+        )
+    return when (val result = loadCollection(kind, serverPage, favoriteOrder)) {
+        is JmxResult.Success -> JmxResult.Success(
+            FavoriteLogicalPage(
+                albums = result.value.albums.reversed(),
+                total = result.value.total,
+                serverPageCount = pageCount,
+            ),
+        )
+        is JmxResult.Failure -> result
+    }
 }
 
 private const val ACCOUNT_COLLECTION_FOOTER = "account-collection-footer"

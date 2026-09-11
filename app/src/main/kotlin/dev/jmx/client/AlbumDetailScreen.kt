@@ -30,12 +30,14 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -150,6 +152,7 @@ internal fun AlbumDetailTransitionHost(
     onSearchRequested: (String) -> Unit,
     onStartReading: (ReaderLaunchRequest) -> Unit,
     onDismiss: () -> Unit,
+    onChaptersLoaded: (String, Int) -> Unit = { _, _ -> },
     topBarBlurStyle: TopBarBlurStyle = TopBarBlurStyle.GAUSSIAN,
 ) {
     val transitionProgress = remember(request.album.id) { Animatable(0f) }
@@ -237,6 +240,7 @@ internal fun AlbumDetailTransitionHost(
                 (hasEntered && progress >= 0.999f && !isExiting),
             onBack = { exitDetail() },
             onCoverTargetChanged = { bounds -> targetBounds = bounds },
+            onChaptersLoaded = onChaptersLoaded,
             topBarBlurStyle = topBarBlurStyle,
             modifier = Modifier
                 .fillMaxSize()
@@ -296,6 +300,7 @@ private fun AlbumDetailScreen(
     showCover: Boolean,
     onBack: () -> Unit,
     onCoverTargetChanged: (Rect) -> Unit,
+    onChaptersLoaded: (String, Int) -> Unit = { _, _ -> },
     topBarBlurStyle: TopBarBlurStyle = TopBarBlurStyle.GAUSSIAN,
     modifier: Modifier = Modifier,
 ) {
@@ -323,6 +328,8 @@ private fun AlbumDetailScreen(
         val loaded = repository.load(album.id)
         state = loaded
         val content = loaded as? AlbumDetailUiState.Content ?: return@LaunchedEffect
+        // 详情页拿到的章节列表比任何一次后台扫描都新，交给更新追踪对账并清掉这部漫画的提示。
+        onChaptersLoaded(album.id, content.detail.readingChapters().size)
         val comments = repository.loadInitialComments(album.id)
         val latest = state as? AlbumDetailUiState.Content
         if (latest?.detail?.id == content.detail.id) {
@@ -1141,56 +1148,76 @@ private fun BookshelfGroupPickerDialog(
         summary = "不选择分组时只加入“全部”，也可以同时加入多个自定义分组。",
         onDismissRequest = onDismiss,
     ) {
-        groups.forEach { group ->
-            val selected = group.id in selectedGroupIds
-            val itemColor by animateColorAsState(
-                targetValue = if (selected) {
-                    MiuixTheme.colorScheme.primaryContainer
-                } else {
-                    MiuixTheme.colorScheme.surfaceContainerHigh
-                },
-                animationSpec = tween(180),
-                label = "DetailBookshelfGroupColor",
-            )
-            Surface(
-                onClick = {
-                    selectedGroupIds = if (selected) {
-                        selectedGroupIds - group.id
+        // 高度封顶 + 内部滚动：分组数量没有上限，直接 forEach 会把下面的按钮挤出屏幕（issue #10 同类问题）。
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 260.dp),
+        ) {
+            items(items = groups, key = BookshelfGroup::id) { group ->
+                val selected = group.id in selectedGroupIds
+                val itemColor by animateColorAsState(
+                    targetValue = if (selected) {
+                        MiuixTheme.colorScheme.primaryContainer
                     } else {
-                        selectedGroupIds + group.id
-                    }
-                },
-                shape = RoundedCornerShape(8.dp),
-                color = itemColor,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 3.dp),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = group.name,
-                        style = MiuixTheme.textStyles.body2,
-                        color = if (selected) {
-                            MiuixTheme.colorScheme.onPrimaryContainer
+                        MiuixTheme.colorScheme.surfaceContainerHigh
+                    },
+                    animationSpec = tween(180),
+                    label = "DetailBookshelfGroupColor",
+                )
+                Surface(
+                    onClick = {
+                        selectedGroupIds = if (selected) {
+                            selectedGroupIds - group.id
                         } else {
-                            MiuixTheme.colorScheme.onSurface
-                        },
-                    )
-                    DetailGroupSelectionIndicator(selected = selected)
+                            selectedGroupIds + group.id
+                        }
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    color = itemColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = group.name,
+                            style = MiuixTheme.textStyles.body2,
+                            color = if (selected) {
+                                MiuixTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MiuixTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        DetailGroupSelectionIndicator(selected = selected)
+                    }
                 }
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
-        TextButton(
-            text = if (selectedGroupIds.isEmpty()) "仅加入全部" else "加入书架",
-            onClick = { onConfirm(selectedGroupIds) },
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.textButtonColorsPrimary(),
-        )
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            TextButton(
+                text = "取消",
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                text = if (selectedGroupIds.isEmpty()) "仅加入全部" else "加入书架",
+                onClick = { onConfirm(selectedGroupIds) },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
     }
 }
 

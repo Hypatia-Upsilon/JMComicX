@@ -72,6 +72,11 @@ internal fun SettingsScreen(
     onTopBarBlurStyleChanged: (TopBarBlurStyle) -> Unit,
     onLiquidGlassNavBarChanged: (Boolean) -> Unit,
     onFloatingNavBarStyleChanged: (FloatingNavBarStyle) -> Unit,
+    comicUpdateSummary: String = "",
+    scanningComicUpdates: Boolean = false,
+    onScanComicUpdates: () -> Unit = {},
+    onSimulateComicUpdates: () -> Unit = {},
+    onClearComicUpdates: () -> Unit = {},
     backdrop: LayerBackdrop? = null,
 ) {
     var showClearConfirmation by remember { mutableStateOf(false) }
@@ -235,6 +240,41 @@ internal fun SettingsScreen(
                             }
                         },
                         onClick = { if (!checkingForUpdates) onCheckForUpdates() },
+                    )
+                }
+            }
+        }
+        item(key = "settings-comic-updates") {
+            Column {
+                SmallTitle(text = "漫画更新提示")
+                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    ArrowPreference(
+                        title = "立即检查漫画更新",
+                        summary = comicUpdateSummary,
+                        endActions = {
+                            if (scanningComicUpdates) {
+                                CircularProgressIndicator(
+                                    size = 20.dp,
+                                    strokeWidth = 3.dp,
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                )
+                            }
+                        },
+                        onClick = { if (!scanningComicUpdates) onScanComicUpdates() },
+                    )
+                    ArrowPreference(
+                        title = "模拟一次漫画更新",
+                        // 真实更新几天才来一次，没有这个入口就没法验证红点、角标和消失时机。
+                        summary = "把书架前 $SIMULATED_UPDATE_ALBUMS 部漫画的基线回退 " +
+                            "$SIMULATED_UPDATE_CHAPTERS 话，用于自测提示链路",
+                        enabled = !scanningComicUpdates,
+                        onClick = onSimulateComicUpdates,
+                    )
+                    ArrowPreference(
+                        title = "清除所有更新提示",
+                        summary = "把当前所有更新标记按已看过处理",
+                        enabled = !scanningComicUpdates,
+                        onClick = onClearComicUpdates,
                     )
                 }
             }
@@ -608,3 +648,9 @@ internal data class EndpointDialogState(
 private val AvailableSignalColor = Color(0xFF168A50)
 private val SlowSignalColor = Color(0xFFB06B00)
 private val UnavailableSignalColor = Color(0xFFCB3A31)
+
+/** 模拟更新时改动的漫画部数：够验证"我的"页的计数角标，又不至于把整屏都标红。 */
+internal const val SIMULATED_UPDATE_ALBUMS = 3
+
+/** 模拟更新时伪造的新增话数。 */
+internal const val SIMULATED_UPDATE_CHAPTERS = 2

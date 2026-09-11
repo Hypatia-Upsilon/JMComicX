@@ -78,6 +78,7 @@ import top.yukonga.miuix.kmp.basic.DropdownEntry
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Surface
@@ -86,6 +87,7 @@ import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.icon.basic.Search
@@ -122,6 +124,8 @@ internal fun BookshelfScreen(
     onPendingGroupConsumed: () -> Unit = {},
     barBackdrop: top.yukonga.miuix.kmp.blur.LayerBackdrop? = null,
     topBarBlurStyle: dev.jmx.client.effect.TopBarBlurStyle = dev.jmx.client.effect.TopBarBlurStyle.GAUSSIAN,
+    updateRecords: Map<String, AlbumUpdateRecord> = emptyMap(),
+    onRefresh: suspend () -> Unit = {},
 ) {
     val activeBarBackdrop = barBackdrop ?: dev.jmx.client.effect.rememberBarBackdrop()
     var groups by remember(repository) { mutableStateOf(repository.groups()) }
@@ -129,10 +133,12 @@ internal fun BookshelfScreen(
         mutableStateOf(ALL_BOOKSHELF_GROUP_ID)
     }
     var sortOrder by remember(repository) { mutableStateOf(repository.sortOrder()) }
-    var entries by remember(repository, selectedGroupId, sortOrder) {
-        mutableStateOf(repository.entries(selectedGroupId, sortOrder))
+    var sortDirection by remember(repository) { mutableStateOf(repository.sortDirection()) }
+    var entries by remember(repository, selectedGroupId, sortOrder, sortDirection) {
+        mutableStateOf(repository.entries(selectedGroupId, sortOrder, sortDirection))
     }
     var showGroupEditor by remember { mutableStateOf(false) }
+    var refreshing by remember { mutableStateOf(false) }
     var showGroupManager by remember { mutableStateOf(false) }
     var editingGroup by remember { mutableStateOf<BookshelfGroup?>(null) }
     var showManualPicker by remember { mutableStateOf(false) }
@@ -165,8 +171,28 @@ internal fun BookshelfScreen(
         if (selectedGroupId != ALL_BOOKSHELF_GROUP_ID && groups.none { it.id == selectedGroupId }) {
             selectedGroupId = ALL_BOOKSHELF_GROUP_ID
         }
-        entries = repository.entries(selectedGroupId, sortOrder)
+        entries = repository.entries(selectedGroupId, sortOrder, sortDirection)
         contentRevision++
+    }
+
+    /**
+     * 下拉刷新。
+     *
+     * 不是"只为更新检测"服务的：它同时重读本地书架（分组规则、阅读进度可能在别处改过）
+     * 并让外部触发一次强制更新扫描。用户的极端场景——正好在下拉时某部漫画更新了——
+     * 靠 [onRefresh] 里的强制扫描兜住，不受最小扫描间隔限制。
+     */
+    fun refreshBookshelf() {
+        if (refreshing) return
+        refreshing = true
+        coroutineScope.launch {
+            try {
+                reload()
+                onRefresh()
+            } finally {
+                refreshing = false
+            }
+        }
     }
 
     fun applyImport(snapshot: BookshelfSnapshot, replace: Boolean) {
@@ -201,9 +227,9 @@ internal fun BookshelfScreen(
         }
     }
 
-    LaunchedEffect(repository, revision, selectedGroupId, sortOrder) {
+    LaunchedEffect(repository, revision, selectedGroupId, sortOrder, sortDirection) {
         groups = repository.groups()
-        entries = repository.entries(selectedGroupId, sortOrder)
+        entries = repository.entries(selectedGroupId, sortOrder, sortDirection)
     }
 
     fun requireAuthentication() {
@@ -275,18 +301,52 @@ internal fun BookshelfScreen(
         runAutoCollect(updated)
     }
 
+    // 名称 / 更新时间 / 最近阅读 放回"排序方式"的二级菜单；同一菜单底部再加一个"倒序"勾选项，
+    // 勾上=倒序、不勾=正序。方向是跟着当前字段走的修饰项，与字段同列一眼就能看清
+    // "按什么 + 哪个方向"，也省掉了原先第二个子菜单那次多余的展开。
     val sortChildren = BookshelfSortOrder.entries.map { order ->
         DropdownItem(
             text = order.label,
             selected = order == sortOrder,
             onClick = {
                 sortOrder = order
+                sortDirection = repository.sortDirection(order)
                 repository.setSortOrder(order)
             },
         )
-    }
+    } + DropdownItem(
+        text = "倒序",
+        selected = sortDirection == BookshelfSortDirection.DESCENDING,
+        onClick = {
+            val next = if (sortDirection == BookshelfSortDirection.DESCENDING) {
+                BookshelfSortDirection.ASCENDING
+            } else {
+                BookshelfSortDirection.DESCENDING
+            }
+            sortDirection = next
+            repository.setSortDirection(sortOrder, next)
+        },
+    )
     val selectedGroup = groups.firstOrNull { it.id == selectedGroupId }
     val groupTabs = listOf("全部") + groups.map(BookshelfGroup::name)
+    // 红点按"这一组里有没有漫画在更新"算，而不是各标签各记一份已读。
+    // 同一部漫画同时在"全部"和自建分组里，点开它之后两个标签的红点自然一起消失。
+    val badgedTabs = remember(groups, updateRecords, revision, contentRevision, repository) {
+        if (updateRecords.values.none(AlbumUpdateRecord::hasUpdate)) {
+            emptySet()
+        } else {
+            buildSet {
+                val pendingIds = updateRecords.values
+                    .filter(AlbumUpdateRecord::hasUpdate)
+                    .mapTo(mutableSetOf(), AlbumUpdateRecord::albumId)
+                val all = repository.entries()
+                if (all.any { it.albumId in pendingIds }) add(0)
+                groups.forEachIndexed { index, group ->
+                    if (all.any { group.id in it.groupIds && it.albumId in pendingIds }) add(index + 1)
+                }
+            }
+        }
+    }
     val selectedGroupIndex = (groups.indexOfFirst { it.id == selectedGroupId } + 1).coerceAtLeast(0)
     val pagerState = rememberPagerState(initialPage = selectedGroupIndex) { groupTabs.size }
 
@@ -369,7 +429,7 @@ internal fun BookshelfScreen(
             add(
                 DropdownItem(
                     text = "排序方式",
-                    summary = sortOrder.label,
+                    summary = "${sortOrder.label} · ${sortDirection.label}",
                     children = sortChildren,
                 ),
             )
@@ -525,6 +585,7 @@ internal fun BookshelfScreen(
                     selectionProgress = {
                         pagerState.currentPage + pagerState.currentPageOffsetFraction
                     },
+                    badgedTabs = badgedTabs,
                 )
             }
             }
@@ -541,9 +602,18 @@ internal fun BookshelfScreen(
                     key = { page -> groups.getOrNull(page - 1)?.id ?: ALL_BOOKSHELF_GROUP_ID },
                 ) { page ->
                 val pageGroupId = groups.getOrNull(page - 1)?.id ?: ALL_BOOKSHELF_GROUP_ID
-                val pageEntries = remember(pageGroupId, sortOrder, revision, contentRevision) {
-                    repository.entries(pageGroupId, sortOrder)
+                val pageEntries = remember(pageGroupId, sortOrder, sortDirection, revision, contentRevision) {
+                    repository.entries(pageGroupId, sortOrder, sortDirection)
                 }
+                val pullToRefreshState = rememberPullToRefreshState()
+                PullToRefresh(
+                    // 只让当前页显示刷新动效：分页器会同时组合相邻页，否则左右页也会跟着转圈。
+                    isRefreshing = refreshing && pagerState.currentPage == page,
+                    onRefresh = ::refreshBookshelf,
+                    pullToRefreshState = pullToRefreshState,
+                    refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新", "刷新完成"),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
                 if (pageEntries.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize().padding(top = topInset)) {
                         BookshelfEmptyState(customGroup = page > 0)
@@ -581,6 +651,12 @@ internal fun BookshelfScreen(
                                             selectionMode = true
                                             selectedIds = selectedIds + entry.albumId
                                         },
+                                        // 多选态下不画更新角标：那时封面上已经压了一层选中遮罩。
+                                        updateChapters = if (selectionMode) {
+                                            0
+                                        } else {
+                                            updateRecords[entry.albumId]?.pendingChapters ?: 0
+                                        },
                                     )
                                     if (selectionMode) {
                                         BookshelfSelectionOverlay(
@@ -613,6 +689,7 @@ internal fun BookshelfScreen(
                             )
                         }
                     }
+                }
                 }
             }
         }

@@ -7,30 +7,57 @@ import org.junit.Test
 
 class SearchTagFilterTest {
     @Test
-    fun includeFilterMatchesTraditionalAlbumTags() {
-        val filter = SearchTagFilter(tags = listOf("连载中"))
+    fun toggleIncludeAddsTagAndReportsIncludeState() {
+        val filter = SearchTagFilter().toggleInclude("连载中")
 
-        assertTrue(filter.matches(listOf("連載中", "全彩")))
-        assertFalse(filter.matches(listOf("已完结", "全彩")))
+        assertTrue(filter.enabled)
+        assertEquals(listOf("连载中"), filter.normalizedIncludeTags)
+        assertEquals(SearchTagState.INCLUDE, filter.stateOf("连载中"))
+        // 服务端会对搜索词做简繁归一化，客户端的状态判断也应把繁体视为同一个标签。
+        assertEquals(SearchTagState.INCLUDE, filter.stateOf("連載中"))
     }
 
     @Test
-    fun includeFilterRequiresEverySelectedTag() {
-        val filter = SearchTagFilter(tags = listOf("全彩", "韩漫"))
+    fun togglingSameTagTwiceClearsIt() {
+        val filter = SearchTagFilter().toggleInclude("全彩").toggleInclude("全彩")
 
-        assertTrue(filter.matches(listOf("全彩", "韓漫")))
-        assertFalse(filter.matches(listOf("全彩")))
+        assertFalse(filter.enabled)
+        assertEquals(SearchTagState.NONE, filter.stateOf("全彩"))
     }
 
     @Test
-    fun excludeFilterRejectsAnySelectedTag() {
+    fun toggleExcludeMovesTagOutOfIncludeSet() {
+        val filter = SearchTagFilter()
+            .toggleInclude("全彩")
+            .toggleExclude("全彩")
+
+        assertEquals(SearchTagState.EXCLUDE, filter.stateOf("全彩"))
+        assertEquals(emptyList<String>(), filter.normalizedIncludeTags)
+        assertEquals(listOf("全彩"), filter.normalizedExcludeTags)
+    }
+
+    @Test
+    fun includeAndExcludeCoexistForDifferentTags() {
+        val filter = SearchTagFilter()
+            .toggleInclude("全彩")
+            .toggleExclude("短篇")
+
+        assertEquals(listOf("全彩"), filter.normalizedIncludeTags)
+        assertEquals(listOf("短篇"), filter.normalizedExcludeTags)
+        assertEquals(SearchTagState.INCLUDE, filter.stateOf("全彩"))
+        assertEquals(SearchTagState.EXCLUDE, filter.stateOf("短篇"))
+    }
+
+    @Test
+    fun normalizedTagsDedupeSimplifiedTraditionalAndPreferInclude() {
         val filter = SearchTagFilter(
-            mode = SearchTagFilterMode.EXCLUDE,
-            tags = listOf("全彩", "短篇"),
+            includeTags = listOf("连载中", "連載中"),
+            excludeTags = listOf("連載中", "短篇"),
         )
 
-        assertTrue(filter.matches(listOf("黑白", "长篇")))
-        assertFalse(filter.matches(listOf("黑白", "短篇")))
+        // 简繁同一标签只保留一次；同一标签同时出现在两边时“包含”优先。
+        assertEquals(listOf("连载中"), filter.normalizedIncludeTags)
+        assertEquals(listOf("短篇"), filter.normalizedExcludeTags)
     }
 
     @Test

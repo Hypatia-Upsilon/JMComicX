@@ -59,7 +59,9 @@ import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalFocusManager
@@ -67,25 +69,23 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.github.houbb.opencc4j.util.ZhConverterUtil
 import androidx.core.graphics.drawable.toDrawable
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
+import com.github.houbb.opencc4j.util.ZhConverterUtil
 import dev.jmx.client.core.api.AlbumDetail
-import dev.jmx.client.core.api.SearchPage
+import dev.jmx.client.core.api.SearchQueryComposer
 import dev.jmx.client.core.protocol.JmxMagicConstants
 import dev.jmx.client.core.result.JmxResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.basic.Badge
+import top.yukonga.miuix.kmp.basic.BadgedBox
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -96,7 +96,6 @@ import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.InputField
 import top.yukonga.miuix.kmp.basic.SearchBar
 import top.yukonga.miuix.kmp.basic.Surface
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -109,9 +108,6 @@ import top.yukonga.miuix.kmp.icon.extended.Sort
 import top.yukonga.miuix.kmp.menu.WindowIconDropdownMenu
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.window.WindowDialog
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import java.util.concurrent.ConcurrentHashMap
 
 @Composable
 internal fun ComicSearchScreen(
@@ -139,7 +135,6 @@ internal fun ComicSearchScreen(
     var inputMode by rememberSaveable(initialQuery) { mutableStateOf(initialQuery.isNullOrBlank()) }
     var searchOrder by rememberSaveable { mutableStateOf(ComicSearchOrder.LATEST) }
     var tagFilter by remember { mutableStateOf(SearchTagFilter()) }
-    var observedTags by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showTagFilter by remember { mutableStateOf(false) }
     val tagStore = remember(context) { SearchTagStore(context) }
     var userTags by remember(tagStore) { mutableStateOf(tagStore.load()) }
@@ -268,7 +263,6 @@ internal fun ComicSearchScreen(
         query = normalizedQuery
         history = historyStore.record(history, normalizedQuery)
         deletingHistory = false
-        observedTags = emptySet()
         submittedQuery = normalizedQuery
         inputMode = false
         searchRequestId++
@@ -285,40 +279,41 @@ internal fun ComicSearchScreen(
     }
 
     LaunchedEffect(submittedQuery, searchRequestId, searchOrder, tagFilter, repository) {
-        val normalizedQuery = submittedQuery ?: return@LaunchedEffect
+        val baseQuery = submittedQuery
+        // 允许“仅标签”的过滤搜索：没有关键词但存在包含标签时也发起。
+        if (baseQuery == null && !tagFilter.enabled) return@LaunchedEffect
+        val queryText = baseQuery.orEmpty()
+        val displayQuery = queryText.ifBlank { tagFilterSummary(tagFilter) }
         state = ComicSearchUiState.Loading
         when (val result = repository.search(
-            normalizedQuery,
+            queryText,
             page = 1,
             order = searchOrder,
             tagFilter = tagFilter,
         )) {
             is ComicSearchResult.Direct -> {
                 state = ComicSearchUiState.Content(
-                    query = normalizedQuery,
+                    query = queryText,
                     albums = listOf(result.album),
                     total = 1,
                     nextPage = 2,
                     order = searchOrder,
                     tagFilter = tagFilter,
-                    stalledFilteredPages = 0,
                     endReached = true,
                 )
                 openAlbum(result.album, null)
             }
             is ComicSearchResult.Page -> {
-                observedTags = observedTags + result.observedTags
                 state = if (result.albums.isEmpty() && result.endReached) {
-                    ComicSearchUiState.Empty(normalizedQuery)
+                    ComicSearchUiState.Empty(displayQuery)
                 } else {
                     ComicSearchUiState.Content(
-                        query = normalizedQuery,
+                        query = queryText,
                         albums = result.albums,
                         total = result.total,
                         nextPage = 2,
                         order = searchOrder,
                         tagFilter = tagFilter,
-                        stalledFilteredPages = 0,
                         endReached = result.endReached,
                     )
                 }
@@ -346,28 +341,17 @@ internal fun ComicSearchScreen(
             ) return@launch
             state = when (result) {
                 is ComicSearchResult.Page -> {
-                    observedTags = observedTags + result.observedTags
                     val mergedPage = mergeSearchAlbums(
                         existing = latest.albums,
                         incoming = result.albums,
                         sourceEndReached = result.endReached,
-                        filterActive = content.tagFilter.enabled,
                     )
-                    val stalledFilteredPages = if (mergedPage.albums.size == latest.albums.size) {
-                        latest.stalledFilteredPages + 1
-                    } else {
-                        0
-                    }
                     latest.copy(
                         albums = mergedPage.albums,
                         total = result.total ?: latest.total,
                         nextPage = latest.nextPage + 1,
                         isLoadingMore = false,
-                        stalledFilteredPages = stalledFilteredPages,
-                        endReached = mergedPage.endReached || (
-                            content.tagFilter.enabled &&
-                                stalledFilteredPages >= MAX_FILTER_STALLED_PAGES
-                            ),
+                        endReached = mergedPage.endReached,
                         loadMoreError = null,
                     )
                 }
@@ -427,18 +411,27 @@ internal fun ComicSearchScreen(
                 label = "SearchEndAction",
             ) { editing ->
                 if (editing) {
-                    Text(
-                        text = "取消",
-                        color = MiuixTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .clickable(onClick = ::cancelInputMode)
-                            .padding(start = 4.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
-                    )
+                    // 输入态也保留标签过滤入口：可以先挑标签再敲关键词，甚至只用标签搜索。
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (SEARCH_TAG_FILTER_UI_ENABLED) {
+                            SearchTagFilterButton(
+                                activeCount = tagFilter.activeCount,
+                                onClick = { showTagFilter = true },
+                            )
+                        }
+                        Text(
+                            text = "取消",
+                            color = MiuixTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clickable(onClick = ::cancelInputMode)
+                                .padding(start = 4.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                        )
+                    }
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (SEARCH_TAG_FILTER_UI_ENABLED) {
                             SearchTagFilterButton(
-                                active = tagFilter.enabled,
+                                activeCount = tagFilter.activeCount,
                                 onClick = { showTagFilter = true },
                             )
                         }
@@ -514,7 +507,6 @@ internal fun ComicSearchScreen(
             filter = tagFilter,
             builtInTags = DEFAULT_SEARCH_TAGS,
             userTags = userTags,
-            observedTags = observedTags.toList().sorted(),
             onAddUserTag = { tag ->
                 tagStore.add(tag)
                 userTags = tagStore.load()
@@ -526,40 +518,56 @@ internal fun ComicSearchScreen(
             onApply = { selected ->
                 tagFilter = selected
                 showTagFilter = false
-                if (submittedQuery != null) searchRequestId++
+                // 应用过滤后重新发起首页搜索：既有关键词、或仅标签过滤，都需要刷新。
+                if (submittedQuery != null || selected.enabled) searchRequestId++
             },
             onDismiss = { showTagFilter = false },
         )
     }
 }
 
-private const val SEARCH_TAG_FILTER_UI_ENABLED = false
+private const val SEARCH_TAG_FILTER_UI_ENABLED = true
 
+/**
+ * 标签过滤入口。
+ *
+ * 未启用时用与其他顶栏图标一致的中性色，不再显示蓝色，避免"看起来已经开着"的误导；
+ * 启用后图标转为主题色，并叠加一个数字角标显示生效的标签数量，状态一眼可见。
+ */
 @Composable
 private fun SearchTagFilterButton(
-    active: Boolean,
+    activeCount: Int,
     onClick: () -> Unit,
 ) {
+    val active = activeCount > 0
     IconButton(
         onClick = onClick,
         minWidth = 42.dp,
         minHeight = 42.dp,
-        backgroundColor = if (active) {
-            MiuixTheme.colorScheme.primaryContainer
-        } else {
-            Color.Transparent
-        },
     ) {
-        Icon(
-            imageVector = MiuixIcons.Filter,
-            contentDescription = if (active) "标签过滤已启用" else "标签过滤",
-            modifier = Modifier.size(20.dp),
-            tint = if (active) {
-                MiuixTheme.colorScheme.onPrimaryContainer
-            } else {
-                MiuixTheme.colorScheme.primary
+        BadgedBox(
+            badge = {
+                if (active) {
+                    Badge(
+                        containerColor = MiuixTheme.colorScheme.primary,
+                        contentColor = MiuixTheme.colorScheme.onPrimary,
+                    ) {
+                        Text(text = activeCount.toString())
+                    }
+                }
             },
-        )
+        ) {
+            Icon(
+                imageVector = MiuixIcons.Filter,
+                contentDescription = if (active) "标签过滤已启用，$activeCount 个标签" else "标签过滤",
+                modifier = Modifier.size(20.dp),
+                tint = if (active) {
+                    MiuixTheme.colorScheme.primary
+                } else {
+                    MiuixTheme.colorScheme.onSurfaceVariantActions
+                },
+            )
+        }
     }
 }
 
@@ -569,41 +577,101 @@ private fun SearchTagFilterDialog(
     filter: SearchTagFilter,
     builtInTags: List<String>,
     userTags: List<String>,
-    observedTags: List<String>,
     onAddUserTag: (String) -> Unit,
     onRemoveUserTag: (String) -> Unit,
     onApply: (SearchTagFilter) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var mode by remember(filter) { mutableStateOf(filter.mode) }
-    var selectedTags by remember(filter) { mutableStateOf(filter.normalizedTags) }
+    // 本地工作副本：点按标签在 无 → 包含(+) → 排除(-) → 无 之间循环，应用时一次性回传。
+    var working by remember(filter) { mutableStateOf(filter) }
     var input by remember { mutableStateOf("") }
-    val userTagSet = userTags.mapNotNull(::normalizeSearchTag).toSet()
-    val tagOptions = (builtInTags + observedTags + userTags)
-        .mapNotNull(::normalizeSearchTag)
-        .distinct()
+    val userTagSet = remember(userTags) { userTags.mapNotNull(::normalizeSearchTag).toSet() }
+    val tagOptions = remember(builtInTags, userTags) {
+        (builtInTags + userTags).mapNotNull(::normalizeSearchTag).distinct()
+    }
+    val chipShape = RoundedCornerShape(8.dp)
+
+    fun cycle(tag: String) {
+        working = when (working.stateOf(tag)) {
+            SearchTagState.NONE -> working.toggleInclude(tag)
+            SearchTagState.INCLUDE -> working.toggleExclude(tag)
+            SearchTagState.EXCLUDE -> working.toggleExclude(tag)
+        }
+    }
+
+    fun deleteUserTag(tag: String) {
+        onRemoveUserTag(tag)
+        working = working.copy(
+            includeTags = working.includeTags.filter { normalizeSearchTag(it) != tag },
+            excludeTags = working.excludeTags.filter { normalizeSearchTag(it) != tag },
+        )
+    }
 
     fun addInputTag() {
         val tag = normalizeSearchTag(input) ?: return
-        selectedTags = (selectedTags + tag).distinct()
         onAddUserTag(tag)
+        // 新增即视为“包含”，若已存在则保持既有状态。
+        if (working.stateOf(tag) != SearchTagState.INCLUDE) {
+            working = working.toggleInclude(tag)
+        }
         input = ""
     }
+
+    val includeCount = working.normalizedIncludeTags.size
+    val excludeCount = working.normalizedExcludeTags.size
 
     WindowDialog(
         show = true,
         title = "标签过滤",
-        summary = if (selectedTags.isEmpty()) "未启用标签过滤" else "已选择 ${selectedTags.size} 个标签",
+        summary = if (!working.enabled) {
+            "点按标签切换：包含 → 排除 → 取消"
+        } else {
+            buildList {
+                if (includeCount > 0) add("包含 $includeCount")
+                if (excludeCount > 0) add("排除 $excludeCount")
+            }.joinToString(" · ")
+        },
         onDismissRequest = onDismiss,
     ) {
-        TabRowWithContour(
-            tabs = listOf("只显示包含", "排除包含"),
-            selectedTabIndex = if (mode == SearchTagFilterMode.INCLUDE) 0 else 1,
-            onTabSelected = { index ->
-                mode = if (index == 0) SearchTagFilterMode.INCLUDE else SearchTagFilterMode.EXCLUDE
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // 已选条件常驻显示：状态不藏在点击循环里，点一下即可直接移除该条件。
+        if (working.enabled) {
+            Text(
+                text = "已选条件（点按移除）",
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                working.normalizedIncludeTags.forEach { tag ->
+                    SearchTagChip(
+                        label = "＋$tag",
+                        container = MiuixTheme.colorScheme.primaryContainer,
+                        onContainer = MiuixTheme.colorScheme.onPrimaryContainer,
+                        shape = chipShape,
+                        onClick = { working = working.toggleInclude(tag) },
+                    )
+                }
+                working.normalizedExcludeTags.forEach { tag ->
+                    SearchTagChip(
+                        label = "－$tag",
+                        container = MiuixTheme.colorScheme.errorContainer,
+                        onContainer = MiuixTheme.colorScheme.onErrorContainer,
+                        shape = chipShape,
+                        onClick = { working = working.toggleExclude(tag) },
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "尚未添加条件。＋ 表示结果必须包含，－ 表示结果必须排除。",
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
         Spacer(modifier = Modifier.height(14.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -613,7 +681,7 @@ private fun SearchTagFilterDialog(
             TextField(
                 value = input,
                 onValueChange = { input = it },
-                label = "输入自定义标签",
+                label = "新增自定义标签",
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
@@ -626,7 +694,7 @@ private fun SearchTagFilterDialog(
         }
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = if (observedTags.isEmpty()) "可选标签" else "当前结果中的标签",
+            text = "可选标签：点按依次切换 ＋包含 / －排除 / 取消，长按删除自定义标签",
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
@@ -634,7 +702,7 @@ private fun SearchTagFilterDialog(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 280.dp)
+                .heightIn(max = 260.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
             FlowRow(
@@ -642,33 +710,31 @@ private fun SearchTagFilterDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 tagOptions.forEach { tag ->
-                    val selected = tag in selectedTags
-                    Surface(
-                        onClick = {
-                            selectedTags = if (selected) {
-                                selectedTags.filterNot { it == tag }
-                            } else {
-                                selectedTags + tag
-                            }
+                    val tagState = working.stateOf(tag)
+                    SearchTagChip(
+                        label = when (tagState) {
+                            SearchTagState.INCLUDE -> "＋$tag"
+                            SearchTagState.EXCLUDE -> "－$tag"
+                            SearchTagState.NONE -> tag
                         },
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (selected) {
-                            MiuixTheme.colorScheme.primaryContainer
+                        container = when (tagState) {
+                            SearchTagState.INCLUDE -> MiuixTheme.colorScheme.primaryContainer
+                            SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.errorContainer
+                            SearchTagState.NONE -> MiuixTheme.colorScheme.surfaceContainerHigh
+                        },
+                        onContainer = when (tagState) {
+                            SearchTagState.INCLUDE -> MiuixTheme.colorScheme.onPrimaryContainer
+                            SearchTagState.EXCLUDE -> MiuixTheme.colorScheme.onErrorContainer
+                            SearchTagState.NONE -> MiuixTheme.colorScheme.onSurface
+                        },
+                        shape = chipShape,
+                        onClick = { cycle(tag) },
+                        onLongClick = if (tag in userTagSet) {
+                            { deleteUserTag(tag) }
                         } else {
-                            MiuixTheme.colorScheme.surfaceContainerHigh
+                            null
                         },
-                    ) {
-                        Text(
-                            text = tag,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                            style = MiuixTheme.textStyles.footnote1,
-                            color = if (selected) {
-                                MiuixTheme.colorScheme.onPrimaryContainer
-                            } else {
-                                MiuixTheme.colorScheme.onSurface
-                            },
-                        )
-                    }
+                    )
                 }
             }
         }
@@ -679,23 +745,39 @@ private fun SearchTagFilterDialog(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(
-                text = "清除筛选",
-                enabled = selectedTags.isNotEmpty(),
-                onClick = { selectedTags = emptyList() },
+                text = "清除",
+                enabled = working.enabled,
+                onClick = { working = SearchTagFilter.EMPTY },
             )
-            if (selectedTags.any { it in userTagSet }) {
-                TextButton(
-                    text = "删除自定义",
-                    onClick = {
-                        selectedTags.filter { it in userTagSet }.forEach(onRemoveUserTag)
-                        selectedTags = selectedTags.filterNot { it in userTagSet }
-                    },
-                )
-            }
             TextButton(
                 text = "应用",
-                onClick = { onApply(SearchTagFilter(mode = mode, tags = selectedTags)) },
+                onClick = { onApply(working) },
                 colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchTagChip(
+    label: String,
+    container: Color,
+    onContainer: Color,
+    shape: Shape,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+) {
+    Surface(shape = shape, color = container) {
+        Box(
+            modifier = Modifier
+                .clip(shape)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+        ) {
+            Text(
+                text = label,
+                style = MiuixTheme.textStyles.footnote1,
+                color = onContainer,
             )
         }
     }
@@ -933,9 +1015,12 @@ private fun SearchError(message: String, onRetry: () -> Unit) {
 internal class ComicSearchRepository(
     private val homeRepository: HomeRepository,
 ) {
-    private val albumTagCache = ConcurrentHashMap<String, List<String>>()
-    private val tagRequestSemaphore = Semaphore(TAG_DETAIL_CONCURRENCY)
 
+    /**
+     * 单次服务端搜索。标签的包含/排除通过 [SearchQueryComposer] 拼进 search_query，由服务端
+     * 一次性完成过滤，客户端不再逐条拉取详情。服务端自身完成简繁归一化，因此无需简繁变体扩散，
+     * 每页只发一个请求。
+     */
     suspend fun search(
         query: String,
         page: Int,
@@ -943,50 +1028,46 @@ internal class ComicSearchRepository(
         tagFilter: SearchTagFilter = SearchTagFilter(),
     ): ComicSearchResult {
         val normalizedQuery = query.trim()
+        // 纯车号直达详情（无过滤语义）。
         val directId = normalizedQuery.toJmSearchIdOrNull()
-        if (directId != null) return loadDirectAlbum(directId)
+        if (directId != null && !tagFilter.enabled) return loadDirectAlbum(directId)
+
+        val composedQuery = SearchQueryComposer.compose(
+            baseQuery = normalizedQuery,
+            includeTags = tagFilter.normalizedIncludeTags,
+            excludeTags = tagFilter.normalizedExcludeTags,
+        )
+        if (composedQuery.isBlank()) return ComicSearchResult.Error("请输入搜索关键词或至少一个包含标签。")
 
         return withContext(Dispatchers.IO) {
-            val variants = searchQueryVariants(normalizedQuery, ::toTraditionalChinese)
             try {
-                val requests = variants.flatMap { variant ->
-                    SEARCH_MAIN_TAGS.map { mainTag -> variant to mainTag }
-                }
-                val results = coroutineScope {
-                    requests.map { (variant, mainTag) ->
-                        async {
-                            homeRepository.core.albumApi.search(
-                                query = variant,
-                                page = page,
-                                order = order.apiValue,
-                                mainTag = mainTag,
+                when (val result = homeRepository.core.albumApi.searchResolved(
+                    query = composedQuery,
+                    page = page,
+                    order = order.apiValue,
+                    mainTag = JmxMagicConstants.MAIN_TAG_ALL,
+                )) {
+                    is JmxResult.Success -> {
+                        val searchPage = result.value
+                        // 车号直达（服务端重定向）：无过滤时命中，直接进入详情。
+                        val redirectId = searchPage.redirectAlbumId?.takeIf { it.isNotBlank() }
+                        if (redirectId != null && !tagFilter.enabled && searchPage.content.size == 1) {
+                            ComicSearchResult.Direct(
+                                searchPage.content.first().toHomeAlbum(homeRepository.currentImageHost),
+                            )
+                        } else {
+                            val albums = searchPage.content
+                                .map { it.toHomeAlbum(homeRepository.currentImageHost) }
+                                .distinctBy { it.id }
+                            ComicSearchResult.Page(
+                                albums = albums,
+                                total = searchPage.total,
+                                endReached = searchPage.content.isEmpty(),
+                                tagFilter = tagFilter,
                             )
                         }
-                    }.awaitAll()
-                }
-                val successes = results.mapNotNull { (it as? JmxResult.Success)?.value }
-                if (successes.isEmpty()) {
-                    val failure = results.firstOrNull() as? JmxResult.Failure
-                    ComicSearchResult.Error(failure?.error?.toUiMessage() ?: "搜索请求失败。")
-                } else {
-                    val redirects = successes.mapNotNull(SearchPage::redirectAlbumId).distinct()
-                    val redirectedAlbums = redirects.mapNotNull { id ->
-                        (homeRepository.core.albumApi.detailFull(id) as? JmxResult.Success)
-                            ?.value
-                            ?.toHomeAlbum(homeRepository.currentImageHost)
                     }
-                    val summaries = successes.flatMap(SearchPage::content)
-                    val albums = (redirectedAlbums + summaries.map { summary ->
-                        summary.toHomeAlbum(homeRepository.currentImageHost)
-                    }).distinctBy { it.id }
-                    val filtered = filterAlbumsByTags(albums, tagFilter)
-                    ComicSearchResult.Page(
-                        albums = filtered.albums,
-                        total = successes.mapNotNull(SearchPage::total).maxOrNull(),
-                        endReached = successes.all { it.content.isEmpty() && it.redirectAlbumId == null },
-                        observedTags = filtered.observedTags,
-                        tagFilter = tagFilter,
-                    )
+                    is JmxResult.Failure -> ComicSearchResult.Error(result.error.toUiMessage())
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -995,64 +1076,6 @@ internal class ComicSearchRepository(
             }
         }
     }
-
-    private suspend fun filterAlbumsByTags(
-        albums: List<HomeAlbum>,
-        filter: SearchTagFilter,
-    ): TagFilterResult {
-        if (!filter.enabled || albums.isEmpty()) {
-            return TagFilterResult(albums = albums, observedTags = emptySet())
-        }
-
-        val taggedAlbums = coroutineScope {
-            albums.map { album ->
-                async {
-                    album to loadAlbumTags(album)
-                }
-            }.awaitAll()
-        }
-        val observedTags = taggedAlbums
-            .flatMap { (_, tags) -> tags.orEmpty() }
-            .mapNotNull(::normalizeSearchTag)
-            .toSet()
-        val filteredAlbums = taggedAlbums.filter { (_, tags) ->
-            when {
-                tags != null -> filter.matches(tags)
-                filter.mode == SearchTagFilterMode.EXCLUDE -> true
-                else -> false
-            }
-        }.map { (album, _) -> album }
-        return TagFilterResult(
-            albums = filteredAlbums,
-            observedTags = observedTags,
-        )
-    }
-
-    private suspend fun loadAlbumTags(album: HomeAlbum): List<String>? {
-        albumTagCache[album.id]?.let { return it }
-        return try {
-            withTimeoutOrNull(TAG_DETAIL_TIMEOUT_MILLIS) {
-                tagRequestSemaphore.withPermit {
-                    when (val result = homeRepository.core.albumApi.detailFull(album.id)) {
-                        is JmxResult.Success -> result.value.tags
-                            .mapNotNull(::normalizeSearchTag)
-                            .distinct()
-                            .also { albumTagCache[album.id] = it }
-                        is JmxResult.Failure -> null
-                    }
-                }
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private data class TagFilterResult(
-        val albums: List<HomeAlbum>,
-        val observedTags: Set<String>,
-    )
 
     private suspend fun loadDirectAlbum(albumId: String): ComicSearchResult {
         return when (val result = homeRepository.core.albumApi.detailFull(albumId)) {
@@ -1080,7 +1103,6 @@ internal sealed interface ComicSearchResult {
         val albums: List<HomeAlbum>,
         val total: Int?,
         val endReached: Boolean,
-        val observedTags: Set<String> = emptySet(),
         val tagFilter: SearchTagFilter = SearchTagFilter(),
     ) : ComicSearchResult
     data class Error(val message: String) : ComicSearchResult
@@ -1095,13 +1117,12 @@ internal fun mergeSearchAlbums(
     existing: List<HomeAlbum>,
     incoming: List<HomeAlbum>,
     sourceEndReached: Boolean,
-    filterActive: Boolean = false,
 ): SearchAlbumMerge {
     val existingIds = existing.mapTo(hashSetOf()) { it.id }
     val newAlbums = incoming.filter { it.id !in existingIds }.distinctBy { it.id }
     return SearchAlbumMerge(
         albums = existing + newAlbums,
-        endReached = sourceEndReached || (!filterActive && newAlbums.isEmpty()),
+        endReached = sourceEndReached || newAlbums.isEmpty(),
     )
 }
 
@@ -1117,22 +1138,19 @@ private sealed interface ComicSearchUiState {
         val nextPage: Int,
         val order: ComicSearchOrder,
         val tagFilter: SearchTagFilter = SearchTagFilter(),
-        val stalledFilteredPages: Int = 0,
         val isLoadingMore: Boolean = false,
         val endReached: Boolean = false,
         val loadMoreError: String? = null,
     ) : ComicSearchUiState
 }
 
-internal fun searchQueryVariants(
-    query: String,
-    toTraditional: (String) -> String,
-): List<String> {
-    val normalized = query.trim()
-    if (normalized.isEmpty()) return emptyList()
-    return listOf(normalized, toTraditional(normalized).trim())
-        .filter { it.isNotEmpty() }
-        .distinct()
+/** 仅标签过滤（无关键词）时用于展示/历史/空态的摘要文案。 */
+internal fun tagFilterSummary(filter: SearchTagFilter): String {
+    val parts = buildList {
+        filter.normalizedIncludeTags.forEach { add("+$it") }
+        filter.normalizedExcludeTags.forEach { add("-$it") }
+    }
+    return if (parts.isEmpty()) "标签过滤" else parts.joinToString(" ")
 }
 
 internal fun String.toJmSearchIdOrNull(): String? {
@@ -1149,12 +1167,23 @@ internal fun AlbumDetail.toHomeAlbum(imageHost: String): HomeAlbum {
     )
 }
 
+/**
+ * 生成简/繁体查询变体。搜索结果页已改为依赖服务端自带的简繁归一化，不再需要变体扩散；
+ * 但书架的「按作者搜索全部作品」仍复用这两个工具函数，故保留于此。
+ */
+internal fun searchQueryVariants(
+    query: String,
+    toTraditional: (String) -> String,
+): List<String> {
+    val normalized = query.trim()
+    if (normalized.isEmpty()) return emptyList()
+    return listOf(normalized, toTraditional(normalized).trim())
+        .filter { it.isNotEmpty() }
+        .distinct()
+}
+
 internal fun toTraditionalChinese(text: String): String =
     runCatching { ZhConverterUtil.toTraditional(text) }.getOrDefault(text)
 
 private val JM_SEARCH_ID_REGEX = Regex("(?i)^(?:JM)?\\s*(\\d+)$")
-private val SEARCH_MAIN_TAGS = listOf(0, 3)
 private const val INITIAL_SEARCH_FOCUS_GUARD_MILLIS = 180L
-private const val TAG_DETAIL_CONCURRENCY = 6
-private const val TAG_DETAIL_TIMEOUT_MILLIS = 8_000L
-private const val MAX_FILTER_STALLED_PAGES = 8
