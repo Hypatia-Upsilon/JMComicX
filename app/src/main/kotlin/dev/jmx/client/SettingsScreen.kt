@@ -244,38 +244,41 @@ internal fun SettingsScreen(
                 }
             }
         }
-        item(key = "settings-comic-updates") {
-            Column {
-                SmallTitle(text = "漫画更新提示")
-                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    ArrowPreference(
-                        title = "立即检查漫画更新",
-                        summary = comicUpdateSummary,
-                        endActions = {
-                            if (scanningComicUpdates) {
-                                CircularProgressIndicator(
-                                    size = 20.dp,
-                                    strokeWidth = 3.dp,
-                                    modifier = Modifier.padding(horizontal = 12.dp),
-                                )
-                            }
-                        },
-                        onClick = { if (!scanningComicUpdates) onScanComicUpdates() },
-                    )
-                    ArrowPreference(
-                        title = "模拟一次漫画更新",
-                        // 真实更新几天才来一次，没有这个入口就没法验证红点、角标和消失时机。
-                        summary = "把书架前 $SIMULATED_UPDATE_ALBUMS 部漫画的基线回退 " +
-                            "$SIMULATED_UPDATE_CHAPTERS 话，用于自测提示链路",
-                        enabled = !scanningComicUpdates,
-                        onClick = onSimulateComicUpdates,
-                    )
-                    ArrowPreference(
-                        title = "清除所有更新提示",
-                        summary = "把当前所有更新标记按已看过处理",
-                        enabled = !scanningComicUpdates,
-                        onClick = onClearComicUpdates,
-                    )
+        // 自测入口：release 下这里是编译期常量 false，整块（含其中的字串）会被折叠掉。
+        if (SHOW_COMIC_UPDATE_TEST_ENTRIES) {
+            item(key = "settings-comic-updates") {
+                Column {
+                    SmallTitle(text = "漫画更新提示")
+                    Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                        ArrowPreference(
+                            title = "立即检查漫画更新",
+                            summary = comicUpdateSummary,
+                            endActions = {
+                                if (scanningComicUpdates) {
+                                    CircularProgressIndicator(
+                                        size = 20.dp,
+                                        strokeWidth = 3.dp,
+                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                    )
+                                }
+                            },
+                            onClick = { if (!scanningComicUpdates) onScanComicUpdates() },
+                        )
+                        ArrowPreference(
+                            title = "模拟一次漫画更新",
+                            // 真实更新几天才来一次，没有这个入口就没法验证红点、角标和消失时机。
+                            summary = "把书架前 $SIMULATED_UPDATE_ALBUMS 部漫画的基线回退 " +
+                                "$SIMULATED_UPDATE_CHAPTERS 话，用于自测提示链路",
+                            enabled = !scanningComicUpdates,
+                            onClick = onSimulateComicUpdates,
+                        )
+                        ArrowPreference(
+                            title = "清除所有更新提示",
+                            summary = "把当前所有更新标记按已看过处理",
+                            enabled = !scanningComicUpdates,
+                            onClick = onClearComicUpdates,
+                        )
+                    }
                 }
             }
         }
