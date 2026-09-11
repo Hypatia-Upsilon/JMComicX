@@ -179,7 +179,8 @@ internal fun AccountCollectionScreen(
  * 收藏页顶栏右上角的排序菜单。
  *
  * 排序字段由服务端完成（`o` 参数），所以选完必须重新拉第一页——收藏摘要里没有任何时间字段，
- * 本地排不出来。方向做成二级子菜单：MIUIX 级联菜单最深两级，正好够"字段 + 方向"。
+ * 本地排不出来。字段列为二级菜单，底部再放一个"倒序"勾选项：勾上=倒序、不勾=正序，
+ * 与书架页保持同一套交互。
  */
 @Composable
 internal fun FavoriteSortAction(
@@ -188,31 +189,33 @@ internal fun FavoriteSortAction(
     onOrderSelected: (FavoriteSortOrder) -> Unit,
     onDirectionSelected: (FavoriteSortDirection) -> Unit,
 ) {
-    val entry = DropdownEntry(
-        items = buildList {
-            FavoriteSortOrder.entries.forEach { option ->
-                add(
-                    DropdownItem(
-                        text = option.label,
-                        selected = option == order,
-                        onClick = { onOrderSelected(option) },
-                    ),
-                )
-            }
-            add(
-                DropdownItem(
-                    text = "排序方向",
-                    summary = direction.label,
-                    children = FavoriteSortDirection.entries.map { option ->
-                        DropdownItem(
-                            text = option.label,
-                            selected = option == direction,
-                            onClick = { onDirectionSelected(option) },
-                        )
-                    },
-                ),
+    val children = FavoriteSortOrder.entries.map { option ->
+        DropdownItem(
+            text = option.label,
+            selected = option == order,
+            onClick = { onOrderSelected(option) },
+        )
+    } + DropdownItem(
+        text = "倒序",
+        selected = direction == FavoriteSortDirection.DESCENDING,
+        onClick = {
+            onDirectionSelected(
+                if (direction == FavoriteSortDirection.DESCENDING) {
+                    FavoriteSortDirection.ASCENDING
+                } else {
+                    FavoriteSortDirection.DESCENDING
+                },
             )
         },
+    )
+    val entry = DropdownEntry(
+        items = listOf(
+            DropdownItem(
+                text = "排序方式",
+                summary = "${order.label} · ${direction.label}",
+                children = children,
+            ),
+        ),
     )
     WindowIconCascadingDropdownMenu(entry = entry) {
         Icon(

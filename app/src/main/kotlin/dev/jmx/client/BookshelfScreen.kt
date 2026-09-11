@@ -301,10 +301,10 @@ internal fun BookshelfScreen(
         runAutoCollect(updated)
     }
 
-    // 排序方式与排序方向并列成同一条展开栏里的两组，中间靠 DropdownEntry 自带的分割线隔开。
-    // 不用子菜单：方向是"跟当前字段走"的修饰项，成为子菜单既多一次点击，又会和字段项一样
-    // 带 chevron，看起来像另一种排序方式。
-    val sortOrderItems = BookshelfSortOrder.entries.map { order ->
+    // 名称 / 更新时间 / 最近阅读 放回"排序方式"的二级菜单；同一菜单底部再加一个"倒序"勾选项，
+    // 勾上=倒序、不勾=正序。方向是跟着当前字段走的修饰项，与字段同列一眼就能看清
+    // "按什么 + 哪个方向"，也省掉了原先第二个子菜单那次多余的展开。
+    val sortChildren = BookshelfSortOrder.entries.map { order ->
         DropdownItem(
             text = order.label,
             selected = order == sortOrder,
@@ -314,17 +314,19 @@ internal fun BookshelfScreen(
                 repository.setSortOrder(order)
             },
         )
-    }
-    val sortDirectionItems = BookshelfSortDirection.entries.map { direction ->
-        DropdownItem(
-            text = direction.label,
-            selected = direction == sortDirection,
-            onClick = {
-                sortDirection = direction
-                repository.setSortDirection(sortOrder, direction)
-            },
-        )
-    }
+    } + DropdownItem(
+        text = "倒序",
+        selected = sortDirection == BookshelfSortDirection.DESCENDING,
+        onClick = {
+            val next = if (sortDirection == BookshelfSortDirection.DESCENDING) {
+                BookshelfSortDirection.ASCENDING
+            } else {
+                BookshelfSortDirection.DESCENDING
+            }
+            sortDirection = next
+            repository.setSortDirection(sortOrder, next)
+        },
+    )
     val selectedGroup = groups.firstOrNull { it.id == selectedGroupId }
     val groupTabs = listOf("全部") + groups.map(BookshelfGroup::name)
     // 红点按"这一组里有没有漫画在更新"算，而不是各标签各记一份已读。
@@ -394,61 +396,61 @@ internal fun BookshelfScreen(
             pagerState.scrollToPage(targetPage)
         }
     }
-    // 排序的两组（字段 / 方向）直接摊平成并列选项，靠 DropdownEntry 自带的分割线分隔：
-    // 原来的"排序方式"和"排序方向"两个触发行各要点一次才看得到内容，等于两次点击才换一次排序，
-    // 而且两个行都带 chevron，看起来像同级但不同类的功能。
-    val menuEntries = buildList {
-        add(
-            DropdownEntry(
-                items = listOf(
-                    DropdownItem(
-                        text = "添加分组",
-                        onClick = {
-                            editingGroup = null
-                            showGroupEditor = true
-                        },
-                    ),
-                    DropdownItem(
-                        text = "分组管理",
-                        enabled = selectedGroup != null,
-                        summary = if (selectedGroup == null) "请先切换到要管理的分组" else "修改当前分组规则",
-                        onClick = {
-                            editingGroup = selectedGroup
-                            showGroupManager = selectedGroup != null
-                        },
-                    ),
-                    DropdownItem(
-                        text = "分组序列",
-                        enabled = groups.isNotEmpty(),
-                        summary = if (groups.isEmpty()) "还没有分组" else "调整 tab 顺序 · 快速定位",
-                        onClick = onOpenGroupOrder,
-                    ),
-                ),
-            ),
-        )
-        add(DropdownEntry(items = sortOrderItems))
-        add(DropdownEntry(items = sortDirectionItems))
-        selectedGroup?.let { group ->
+    val menuEntry = DropdownEntry(
+        items = buildList {
             add(
-                DropdownEntry(
-                    items = listOf(
-                        DropdownItem(
-                            text = "删除当前分组",
-                            icon = { modifier ->
-                                Icon(
-                                    imageVector = MiuixIcons.Delete,
-                                    contentDescription = null,
-                                    modifier = modifier,
-                                    tint = MiuixTheme.colorScheme.error,
-                                )
-                            },
-                            onClick = { pendingGroupDeletion = group },
-                        ),
-                    ),
+                DropdownItem(
+                    text = "添加分组",
+                    onClick = {
+                        editingGroup = null
+                        showGroupEditor = true
+                    },
                 ),
             )
-        }
-    }
+            add(
+                DropdownItem(
+                    text = "分组管理",
+                    enabled = selectedGroup != null,
+                    summary = if (selectedGroup == null) "请先切换到要管理的分组" else "修改当前分组规则",
+                    onClick = {
+                        editingGroup = selectedGroup
+                        showGroupManager = selectedGroup != null
+                    },
+                ),
+            )
+            add(
+                DropdownItem(
+                    text = "分组序列",
+                    enabled = groups.isNotEmpty(),
+                    summary = if (groups.isEmpty()) "还没有分组" else "调整 tab 顺序 · 快速定位",
+                    onClick = onOpenGroupOrder,
+                ),
+            )
+            add(
+                DropdownItem(
+                    text = "排序方式",
+                    summary = "${sortOrder.label} · ${sortDirection.label}",
+                    children = sortChildren,
+                ),
+            )
+            selectedGroup?.let { group ->
+                add(
+                    DropdownItem(
+                        text = "删除当前分组",
+                        icon = { modifier ->
+                            Icon(
+                                imageVector = MiuixIcons.Delete,
+                                contentDescription = null,
+                                modifier = modifier,
+                                tint = MiuixTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = { pendingGroupDeletion = group },
+                    ),
+                )
+            }
+        },
+    )
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -559,7 +561,7 @@ internal fun BookshelfScreen(
                                     tint = MiuixTheme.colorScheme.onBackground,
                                 )
                             }
-                            WindowIconCascadingDropdownMenu(entries = menuEntries) {
+                            WindowIconCascadingDropdownMenu(entry = menuEntry) {
                                 Icon(
                                     imageVector = MiuixIcons.ListView,
                                     contentDescription = "书架功能菜单",
