@@ -155,16 +155,23 @@ class BookshelfRepositoryTest {
     }
 
     @Test
-    fun ascendingRecentlyReadPutsNeverReadEntriesFirst() {
+    fun ascendingRecentlyReadPutsMostRecentlyReadFirst() {
         val entries = listOf(
             BookshelfEntry("read", "alpha", "", "", "", addedAt = 10L, updatedAt = 10L, lastReadAt = 100L),
             BookshelfEntry("fresh", "Beta", "", "", "", addedAt = 20L, updatedAt = 20L, lastReadAt = null),
         )
 
-        // 没读过按 Long.MIN_VALUE 处理：正序时排在最前，而不是被当成"刚读过"。
+        // 时间类的"正序"= 最新在前：最近读过的排前面；没读过的按 Long.MIN_VALUE 落到最后，
+        // 而不是被当成"刚读过"顶到最前。
+        assertEquals(
+            listOf("read", "fresh"),
+            sortBookshelf(entries, BookshelfSortOrder.RECENTLY_READ, BookshelfSortDirection.ASCENDING)
+                .map { it.albumId },
+        )
+        // 倒序才把没读过的翻到最前。
         assertEquals(
             listOf("fresh", "read"),
-            sortBookshelf(entries, BookshelfSortOrder.RECENTLY_READ, BookshelfSortDirection.ASCENDING)
+            sortBookshelf(entries, BookshelfSortOrder.RECENTLY_READ, BookshelfSortDirection.DESCENDING)
                 .map { it.albumId },
         )
     }

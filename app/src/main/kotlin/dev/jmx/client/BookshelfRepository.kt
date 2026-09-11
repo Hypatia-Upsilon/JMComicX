@@ -9,19 +9,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 书架排序字段。[defaultDirection] 是该字段的习惯方向：名称默认 A→Z，时间类默认最新在前。
- * 用户没有显式选过方向时沿用它，所以本次新增方向开关不会改变既有排序表现。
+ * 书架排序字段。[defaultDirection] 是该字段在「正序」下的自然顺序：
+ * 名称 A→Z，时间类最新/最近在前。用户没有显式选过方向时沿用它，所以本次改动不改变既有默认表现。
  */
 internal enum class BookshelfSortOrder(
     val label: String,
     val defaultDirection: BookshelfSortDirection,
 ) {
     NAME("名称", BookshelfSortDirection.ASCENDING),
-    UPDATED("更新时间", BookshelfSortDirection.DESCENDING),
-    RECENTLY_READ("最近阅读", BookshelfSortDirection.DESCENDING),
+    UPDATED("更新时间", BookshelfSortDirection.ASCENDING),
+    RECENTLY_READ("最近阅读", BookshelfSortDirection.ASCENDING),
 }
 
-/** 排序方向。ASCENDING 由小到大（A→Z、旧→新），DESCENDING 反之。 */
+/**
+ * 排序方向。
+ *
+ * 「正序」= 该字段的自然顺序：名称 A→Z，更新时间/最近阅读则是**最新在前**
+ * （时间类"顺着时间轴"意味着最近的排最前，与列表默认看到的顺序一致）。
+ * 「倒序」反过来：名称 Z→A，时间类最久/最早在前。
+ */
 internal enum class BookshelfSortDirection(val label: String) {
     ASCENDING("正序"),
     DESCENDING("倒序"),
@@ -442,28 +448,32 @@ private fun bookshelfSortDirectionKey(order: BookshelfSortOrder): String =
     BOOKSHELF_SORT_DIRECTION_KEY_PREFIX + order.name
 
 /**
- * 先按字段构造"由小到大"的比较器，再按方向决定是否整体反转。
- * 反转后的结果与改动前的降序比较器逐项等价（含次级排序键），所以默认方向下排序表现不变。
+ * 先按字段构造"正序"（自然顺序）比较器，再按方向决定是否整体反转。
+ *
+ * 自然顺序不是简单的"由小到大"：名称是 A→Z，时间类却是**最新在前**（时间递减），
+ * 因为对时间字段来说"顺着时间"就是最近的排最前。反转（[BookshelfSortDirection.DESCENDING]）
+ * 后与改动前的降序比较器逐项等价（含次级排序键），所以默认方向下排序表现不变。
  */
 internal fun sortBookshelf(
     entries: List<BookshelfEntry>,
     order: BookshelfSortOrder,
     direction: BookshelfSortDirection = order.defaultDirection,
 ): List<BookshelfEntry> {
-    val ascending: Comparator<BookshelfEntry> = when (order) {
+    val natural: Comparator<BookshelfEntry> = when (order) {
         BookshelfSortOrder.NAME ->
             compareBy<BookshelfEntry> { it.name.lowercase(Locale.ROOT) }
                 .thenBy(BookshelfEntry::albumId)
+        // 时间类正序 = 最新在前，所以主键降序、次级键也降序。
         BookshelfSortOrder.UPDATED ->
-            compareBy<BookshelfEntry>(BookshelfEntry::updatedAt)
-                .thenBy(BookshelfEntry::addedAt)
+            compareByDescending<BookshelfEntry>(BookshelfEntry::updatedAt)
+                .thenByDescending(BookshelfEntry::addedAt)
         BookshelfSortOrder.RECENTLY_READ ->
-            compareBy<BookshelfEntry> { it.lastReadAt ?: Long.MIN_VALUE }
-                .thenBy(BookshelfEntry::updatedAt)
+            compareByDescending<BookshelfEntry> { it.lastReadAt ?: Long.MIN_VALUE }
+                .thenByDescending(BookshelfEntry::updatedAt)
     }
     val comparator = when (direction) {
-        BookshelfSortDirection.ASCENDING -> ascending
-        BookshelfSortDirection.DESCENDING -> ascending.reversed()
+        BookshelfSortDirection.ASCENDING -> natural
+        BookshelfSortDirection.DESCENDING -> natural.reversed()
     }
     return entries.sortedWith(comparator)
 }

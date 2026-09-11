@@ -32,7 +32,14 @@ internal class AlbumUpdateCenter(
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 
+    /** 上一次成功枚举到的收藏成员。角标只数这里面的更新，书架独有漫画不算。 */
+    private val _favoriteAlbumIds = MutableStateFlow(store.favoriteAlbumIds())
+    val favoriteAlbumIds: StateFlow<Set<String>> = _favoriteAlbumIds.asStateFlow()
+
     fun pendingAlbumCount(): Int = _records.value.values.count(AlbumUpdateRecord::hasUpdate)
+
+    /** "我的 → 漫画收藏"角标：收藏成员里有几部在更新。 */
+    fun pendingFavoriteCount(): Int = countPendingFavorites(_records.value, _favoriteAlbumIds.value)
 
     fun pendingChapters(albumId: String): Int =
         _records.value[albumId.trim()]?.pendingChapters ?: 0
@@ -70,11 +77,22 @@ internal class AlbumUpdateCenter(
         try {
             val targets = LinkedHashSet<String>()
             bookshelfRepository.entries().forEach { targets += it.albumId }
+            // 收藏枚举失败（未登录、网络挂了）与"收藏真的是空"必须区分：前者不能拿来
+            // 覆盖已落盘的收藏成员，也不能据此裁剪记录，否则一次抖动就会把收藏角标的
+            // 依据抹掉。只有真正拿到收藏列表时，才刷新落盘的收藏成员。
             if (includeFavorites) {
-                targets += collectFavoriteAlbumIds()
+                val favorites = collectFavoriteAlbumIds()
+                if (favorites != null) {
+                    targets += favorites
+                    store.setFavoriteAlbumIds(favorites)
+                    _favoriteAlbumIds.value = favorites
+                }
             }
-            // 已经不在书架也不在收藏里的漫画不再关注，顺手把陈旧记录清掉。
-            if (targets.isNotEmpty()) store.retainOnly(targets)
+            // 裁剪范围必须涵盖"收藏成员"——哪怕这次没枚举收藏（未登录）。否则未登录时
+            // 一轮扫描就会把收藏漫画的基线删掉，等登录回来只能重新以当前话数打底，
+            // 期间发生的更新就永久漏报了。
+            val keep = LinkedHashSet(targets).apply { addAll(store.favoriteAlbumIds()) }
+            if (keep.isNotEmpty()) store.retainOnly(keep)
             return scanner.scan(targets)
         } finally {
             _scanning.value = false
@@ -90,8 +108,13 @@ internal class AlbumUpdateCenter(
      * 所以从书架里取前几部漫画把基线往回调，让整条链路（红点 → 角标 → 点开消失）可验证。
      */
     fun simulateUpdates(albums: Int, chapters: Int): Int {
-        val ids = bookshelfRepository.entries().take(albums.coerceAtLeast(0)).map { it.albumId }
-        val affected = store.simulateUpdates(ids, chapters)
+        if (albums <= 0) return 0
+        // 收藏优先：这样"我的 → 漫画收藏"的角标也能被验证到，不至于只有书架标签变色。
+        // 未登录时收藏集合为空，自然退化成只模拟书架漫画。
+        val ordered = LinkedHashSet<String>()
+        ordered += store.favoriteAlbumIds()
+        bookshelfRepository.entries().forEach { ordered += it.albumId }
+        val affected = store.simulateUpdates(ordered.take(albums), chapters)
         publish()
         return affected
     }
@@ -105,7 +128,14 @@ internal class AlbumUpdateCenter(
         _records.value = store.records()
     }
 
-    private suspend fun collectFavoriteAlbumIds(): Set<String> {
+    /**
+     * 枚举全部收藏 id。
+     *
+     * 返回 null 表示"没能拿到"（未登录、请求失败、响应畸形），与"收藏是空集合"区分开——
+     * 调用方据此决定要不要把它当作完整的关注集合。中途某一页失败也算拿不到：
+     * 半份收藏列表比没有更危险。
+     */
+    private suspend fun collectFavoriteAlbumIds(): Set<String>? {
         val ids = LinkedHashSet<String>()
         var page = 1
         while (page <= MAX_FAVORITE_PAGES) {
@@ -113,7 +143,7 @@ internal class AlbumUpdateCenter(
                 kind = AccountCollectionKind.FAVORITES,
                 page = page,
             )
-            val value = (result as? JmxResult.Success)?.value ?: break
+            val value = (result as? JmxResult.Success)?.value ?: return null
             if (value.albums.isEmpty()) break
             value.albums.forEach { ids += it.id }
             val total = value.total

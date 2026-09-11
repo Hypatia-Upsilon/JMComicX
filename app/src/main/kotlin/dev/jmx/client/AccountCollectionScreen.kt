@@ -341,9 +341,10 @@ private data class FavoriteLogicalPage(
 /**
  * 按方向取一页。
  *
- * 倒序（以及观看历史）就是服务端原始顺序，直接照搬。正序要把分页整体翻过来：
- * 逻辑第 1 页取服务端最后一页并反转页内顺序。第一次进正序时总页数还不知道，
- * 先探服务端第一页把 `total` 拿回来——刚好只有一页时这一页反转后就是答案，不用再发第二次请求。
+ * 正序（以及观看历史）就是服务端原始顺序——收藏接口固定最新在前，正序要的正是它，直接照搬。
+ * 倒序才需要把分页整体翻过来：逻辑第 1 页取服务端最后一页并反转页内顺序。第一次进倒序时
+ * 总页数还不知道，先探服务端第一页把 `total` 拿回来——刚好只有一页时这一页反转后就是答案，
+ * 不用再发第二次请求。
  */
 private suspend fun AccountDataRepository.loadFavoriteLogicalPage(
     kind: AccountCollectionKind,
@@ -352,7 +353,7 @@ private suspend fun AccountDataRepository.loadFavoriteLogicalPage(
     direction: FavoriteSortDirection,
     knownServerPageCount: Int?,
 ): JmxResult<FavoriteLogicalPage> {
-    if (kind != AccountCollectionKind.FAVORITES || direction == FavoriteSortDirection.DESCENDING) {
+    if (kind != AccountCollectionKind.FAVORITES || direction == FavoriteSortDirection.ASCENDING) {
         return when (val result = loadCollection(kind, logicalPage, favoriteOrder)) {
             is JmxResult.Success -> JmxResult.Success(
                 FavoriteLogicalPage(

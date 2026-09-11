@@ -123,6 +123,24 @@ internal class AlbumUpdateStore(context: Context) {
         }
     }
 
+    /**
+     * 已知的收藏漫画 id。
+     *
+     * "我的 → 漫画收藏"的角标只能数收藏里的更新，而书架和收藏是两套集合：一部只在书架、
+     * 没被收藏的漫画，它的更新不该算进收藏角标。收藏列表又要登录才拿得到，所以把上一次
+     * 成功枚举的收藏 id 落盘，冷启动扫描被最小间隔挡掉时也能算出正确的角标。
+     */
+    fun favoriteAlbumIds(): Set<String> =
+        preferences.getStringSet(ALBUM_UPDATE_FAVORITES_KEY, null)
+            ?.mapTo(mutableSetOf()) { it.trim() }
+            ?.filterTo(mutableSetOf()) { it.isNotEmpty() }
+            ?: emptySet()
+
+    fun setFavoriteAlbumIds(albumIds: Set<String>) {
+        val normalized = albumIds.mapTo(mutableSetOf()) { it.trim() }.filterTo(mutableSetOf()) { it.isNotEmpty() }
+        preferences.edit { putStringSet(ALBUM_UPDATE_FAVORITES_KEY, normalized) }
+    }
+
     /** 不再关注的漫画（移出书架且取消收藏）要清掉，否则记录会无限堆积。 */
     fun retainOnly(albumIds: Set<String>) {
         val keep = albumIds.mapTo(mutableSetOf()) { it.trim() }.filter { it.isNotEmpty() }.toSet()
@@ -207,6 +225,17 @@ internal class AlbumUpdateStore(context: Context) {
     }
 }
 
+/**
+ * "我的 → 漫画收藏"角标要显示的数字：收藏里有几部漫画更新了。
+ *
+ * 只看收藏成员，[favoriteAlbumIds] 之外的书架漫画即使有更新也不算——
+ * 这正是"只在书架的漫画却让收藏冒红点"的成因。
+ */
+internal fun countPendingFavorites(
+    records: Map<String, AlbumUpdateRecord>,
+    favoriteAlbumIds: Set<String>,
+): Int = records.values.count { it.hasUpdate && it.albumId in favoriteAlbumIds }
+
 internal fun encodeAlbumUpdateRecords(records: Map<String, AlbumUpdateRecord>): String {
     val array = JSONArray()
     records.values.forEach { record ->
@@ -245,4 +274,5 @@ internal fun decodeAlbumUpdateRecords(raw: String): Map<String, AlbumUpdateRecor
 private const val ALBUM_UPDATE_PREFERENCES = "jmx_album_updates"
 private const val ALBUM_UPDATE_RECORDS_KEY = "records"
 private const val ALBUM_UPDATE_LAST_SCAN_KEY = "last_scan_at"
+private const val ALBUM_UPDATE_FAVORITES_KEY = "favorite_ids"
 private const val MAX_ALBUM_UPDATE_RECORDS = 1000

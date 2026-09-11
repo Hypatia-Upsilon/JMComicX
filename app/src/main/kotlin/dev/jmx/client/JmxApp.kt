@@ -142,6 +142,8 @@ internal fun JmxApp(
         )
     }
     val albumUpdateRecords by albumUpdateCenter.records.collectAsState()
+    // 收藏成员单独订阅：角标只数收藏里的更新，得在收藏集合变化时重算。
+    val albumFavoriteIds by albumUpdateCenter.favoriteAlbumIds.collectAsState()
     val scanningAlbumUpdates by albumUpdateCenter.scanning.collectAsState()
     val albumUpdateSummary = remember(albumUpdateRecords, scanningAlbumUpdates) {
         val pending = albumUpdateRecords.values.count(AlbumUpdateRecord::hasUpdate)
@@ -660,8 +662,9 @@ internal fun JmxApp(
                                             onHistory = { openProtectedAccountPage(JmxRoute.HISTORY) },
                                             onDaily = { openProtectedAccountPage(JmxRoute.DAILY) },
                                             onAbout = { navigateAccount(JmxRoute.ABOUT) },
-                                            favoriteUpdateCount = albumUpdateRecords.values
-                                                .count(AlbumUpdateRecord::hasUpdate),
+                                            // 只数收藏里的更新：仅在书架、没被收藏的漫画不该让收藏冒红点。
+                                            favoriteUpdateCount = albumUpdateRecords
+                                                .let { countPendingFavorites(it, albumFavoriteIds) },
                                         )
                                         }
                                     }
